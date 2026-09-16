@@ -25,8 +25,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -76,7 +78,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -284,7 +285,9 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     var route by rememberSaveable { mutableStateOf(Route.HOME) }
     var selectedId by rememberSaveable { mutableStateOf("") }
     BackHandler(enabled = route !in mainRoutes) { route = Route.HOME }
-    val go: (Route, String) -> Unit = { next, id -> selectedId = id; route = next }
+    val go: (Route, String) -> Unit = remember {
+        { next, id -> selectedId = id; route = next }
+    }
     Scaffold(
         bottomBar = {
             if (route in mainRoutes) BottomBar(route, ui.language) { route = it }
@@ -292,25 +295,7 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                when (route) {
-                        Route.HOME -> HomeScreen(ui, viewModel, { go(Route.HOMEWORK, "") }, { go(Route.ATTENDANCE, "") }, { route = Route.MESSAGES }, { go(Route.LESSON_DETAIL, it) })
-                        Route.GRADES -> GradesScreen(ui, viewModel) { go(Route.GRADE_DETAIL, it) }
-                        Route.SCHEDULE -> ScheduleScreen(ui, viewModel) { go(Route.LESSON_DETAIL, it) }
-                        Route.MESSAGES -> MessagesScreen(ui, viewModel, { go(Route.MESSAGE_DETAIL, it) }) { route = Route.NEW_MESSAGE }
-                        Route.NEW_MESSAGE -> NewMessageScreen(ui, viewModel, { route = Route.MESSAGES }) {
-                            viewModel.clearMessageAction()
-                            route = Route.MESSAGES
-                            viewModel.sync()
-                        }
-                        Route.MORE -> MoreScreen(ui) { route = it }
-                        Route.HOMEWORK -> HomeworkScreen(ui, viewModel) { go(Route.HOMEWORK_DETAIL, it) }
-                        Route.ATTENDANCE -> AttendanceScreen(ui, viewModel)
-                        Route.SETTINGS -> SettingsScreen(ui, viewModel) { route = Route.HOME }
-                        Route.GRADE_DETAIL -> ui.data.grades.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Grade details", "Szczegóły oceny"), { route = Route.GRADES }) { GradeDetail(it, ui.language) } }
-                        Route.LESSON_DETAIL -> findLesson(ui.data, selectedId)?.let { lesson -> DetailScaffold(ui.language.text("Lesson details", "Szczegóły lekcji"), { route = Route.SCHEDULE }) { LessonDetail(lesson, ui, viewModel) } }
-                        Route.HOMEWORK_DETAIL -> ui.data.homeworks.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Homework details", "Szczegóły pracy domowej"), { route = Route.HOMEWORK }) { HomeworkDetail(it, ui, viewModel) } }
-                        Route.MESSAGE_DETAIL -> ui.data.messages.firstOrNull { it.id == selectedId }?.let { MessageDetailScreen(it, ui, viewModel) { route = Route.MESSAGES } }
-                }
+                RouteHost(route, ui, viewModel, selectedId, go)
             }
             AnimatedVisibility(
                 visible = ui.error != null,
@@ -341,12 +326,29 @@ private fun BottomBar(route: Route, language: AppLanguage, select: (Route) -> Un
             Triple(Route.MORE, language.text("More", "Więcej"), Icons.Default.MoreHoriz)
         )
     }
-    NavigationBar {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 3.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .height(80.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
         items.forEach { (itemRoute, label, icon) ->
             val selected = route == itemRoute
+            val selectionProgress = animateFloatAsState(
+                targetValue = if (selected) 1f else 0f,
+                animationSpec = tween(180),
+                label = "navigation-selection"
+            )
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .fillMaxHeight()
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -362,8 +364,13 @@ private fun BottomBar(route: Route, language: AppLanguage, select: (Route) -> Un
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .graphicsLayer {
+                            val progress = selectionProgress.value
+                            scaleX = 0.96f + (0.04f * progress)
+                            scaleY = 0.96f + (0.04f * progress)
+                        }
                         .background(
-                            color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = selectionProgress.value),
                             shape = RoundedCornerShape(24.dp)
                         )
                         .padding(vertical = 4.dp),
@@ -386,6 +393,47 @@ private fun BottomBar(route: Route, language: AppLanguage, select: (Route) -> Un
                 }
             }
         }
+        }
+    }
+}
+
+@Composable
+private fun RouteHost(
+    route: Route,
+    ui: SchoolUiState,
+    viewModel: SchoolViewModel,
+    selectedId: String,
+    go: (Route, String) -> Unit
+) {
+    RouteContent(route, ui, viewModel, selectedId, go)
+}
+
+@Composable
+private fun RouteContent(
+    route: Route,
+    ui: SchoolUiState,
+    viewModel: SchoolViewModel,
+    selectedId: String,
+    go: (Route, String) -> Unit
+) {
+    when (route) {
+        Route.HOME -> HomeScreen(ui, viewModel, { go(Route.HOMEWORK, "") }, { go(Route.ATTENDANCE, "") }, { go(Route.MESSAGES, "") }, { go(Route.LESSON_DETAIL, it) })
+        Route.GRADES -> GradesScreen(ui, viewModel) { go(Route.GRADE_DETAIL, it) }
+        Route.SCHEDULE -> ScheduleScreen(ui, viewModel) { go(Route.LESSON_DETAIL, it) }
+        Route.MESSAGES -> MessagesScreen(ui, viewModel, { go(Route.MESSAGE_DETAIL, it) }) { go(Route.NEW_MESSAGE, "") }
+        Route.NEW_MESSAGE -> NewMessageScreen(ui, viewModel, { go(Route.MESSAGES, "") }) {
+            viewModel.clearMessageAction()
+            go(Route.MESSAGES, "")
+            viewModel.sync()
+        }
+        Route.MORE -> MoreScreen(ui) { go(it, "") }
+        Route.HOMEWORK -> HomeworkScreen(ui, viewModel) { go(Route.HOMEWORK_DETAIL, it) }
+        Route.ATTENDANCE -> AttendanceScreen(ui, viewModel)
+        Route.SETTINGS -> SettingsScreen(ui, viewModel) { go(Route.HOME, "") }
+        Route.GRADE_DETAIL -> ui.data.grades.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Grade details", "Szczegóły oceny"), { go(Route.GRADES, "") }) { GradeDetail(it, ui.language) } }
+        Route.LESSON_DETAIL -> findLesson(ui.data, selectedId)?.let { lesson -> DetailScaffold(ui.language.text("Lesson details", "Szczegóły lekcji"), { go(Route.SCHEDULE, "") }) { LessonDetail(lesson, ui, viewModel) } }
+        Route.HOMEWORK_DETAIL -> ui.data.homeworks.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Homework details", "Szczegóły pracy domowej"), { go(Route.HOMEWORK, "") }) { HomeworkDetail(it, ui, viewModel) } }
+        Route.MESSAGE_DETAIL -> ui.data.messages.firstOrNull { it.id == selectedId }?.let { MessageDetailScreen(it, ui, viewModel) { go(Route.MESSAGES, "") } }
     }
 }
 

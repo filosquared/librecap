@@ -3,6 +3,7 @@ package com.filiplopes.librecap
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -17,6 +18,7 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.time.Instant
 
+@Immutable
 data class SchoolUiState(
     val ready: Boolean = false,
     val authenticated: Boolean = false,
