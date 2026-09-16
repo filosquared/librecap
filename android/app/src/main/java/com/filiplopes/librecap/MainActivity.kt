@@ -10,17 +10,14 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalAnimationApi
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -80,7 +77,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -101,9 +97,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalUriHandler
@@ -115,6 +113,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.core.view.WindowCompat
 import java.time.LocalDate
 import java.time.LocalTime
@@ -135,6 +137,8 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Route { HOME, GRADES, SCHEDULE, MESSAGES, MORE, HOMEWORK, ATTENDANCE, SETTINGS, GRADE_DETAIL, LESSON_DETAIL, HOMEWORK_DETAIL, MESSAGE_DETAIL, NEW_MESSAGE }
+
+private val mainRoutes = setOf(Route.HOME, Route.GRADES, Route.SCHEDULE, Route.MESSAGES, Route.MORE)
 
 private fun AppLanguage.text(english: String, polish: String): String = if (this == AppLanguage.POLISH) polish else english
 
@@ -179,17 +183,22 @@ private fun LibreCapRoot(viewModel: SchoolViewModel) {
                 !ui.authenticated -> RootScreen.LOGIN
                 else -> RootScreen.APP
             }
-            AnimatedContent(
-                targetState = root,
-                transitionSpec = {
-                    (fadeIn(tween(260)) + slideInHorizontally(tween(260)) { it / 10 }) togetherWith
-                        (fadeOut(tween(180)) + slideOutHorizontally(tween(180)) { -it / 10 })
-                },
-                label = "root-screen",
-                contentKey = { it },
-                modifier = Modifier.fillMaxSize()
-            ) { screen ->
-                when (screen) {
+            var renderedRoot by remember { mutableStateOf(root) }
+            var rootOpacity by remember { mutableStateOf(1f) }
+            val animatedRootOpacity = animateFloatAsState(rootOpacity, tween(70), label = "root-fade")
+            LaunchedEffect(root) {
+                if (renderedRoot == root) return@LaunchedEffect
+                rootOpacity = 0.86f
+                withFrameNanos { }
+                renderedRoot = root
+                rootOpacity = 1f
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = animatedRootOpacity.value }
+            ) {
+                when (renderedRoot) {
                     RootScreen.LOADING -> LoadingScreen(ui.language)
                     RootScreen.LOGIN -> LoginScreen(ui, viewModel)
                     RootScreen.APP -> AuthenticatedApp(ui, viewModel)
@@ -274,7 +283,6 @@ private fun LoginScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
 private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     var route by rememberSaveable { mutableStateOf(Route.HOME) }
     var selectedId by rememberSaveable { mutableStateOf("") }
-    val mainRoutes = setOf(Route.HOME, Route.GRADES, Route.SCHEDULE, Route.MESSAGES, Route.MORE)
     BackHandler(enabled = route !in mainRoutes) { route = Route.HOME }
     val go: (Route, String) -> Unit = { next, id -> selectedId = id; route = next }
     Scaffold(
@@ -284,21 +292,7 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                AnimatedContent(
-                    targetState = route,
-                    transitionSpec = {
-                        if (initialState in mainRoutes && targetState in mainRoutes) {
-                            fadeIn(tween(100)) togetherWith fadeOut(tween(70))
-                        } else {
-                            (fadeIn(tween(240)) + slideInHorizontally(tween(240)) { it / 6 }) togetherWith
-                                (fadeOut(tween(180)) + slideOutHorizontally(tween(180)) { -it / 6 })
-                        }
-                    },
-                    label = "app-route",
-                    contentKey = { it },
-                    modifier = Modifier.fillMaxSize()
-                ) { screen ->
-                    when (screen) {
+                when (route) {
                         Route.HOME -> HomeScreen(ui, viewModel, { go(Route.HOMEWORK, "") }, { go(Route.ATTENDANCE, "") }, { route = Route.MESSAGES }, { go(Route.LESSON_DETAIL, it) })
                         Route.GRADES -> GradesScreen(ui, viewModel) { go(Route.GRADE_DETAIL, it) }
                         Route.SCHEDULE -> ScheduleScreen(ui, viewModel) { go(Route.LESSON_DETAIL, it) }
@@ -316,13 +310,12 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
                         Route.LESSON_DETAIL -> findLesson(ui.data, selectedId)?.let { lesson -> DetailScaffold(ui.language.text("Lesson details", "Szczegóły lekcji"), { route = Route.SCHEDULE }) { LessonDetail(lesson, ui, viewModel) } }
                         Route.HOMEWORK_DETAIL -> ui.data.homeworks.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Homework details", "Szczegóły pracy domowej"), { route = Route.HOMEWORK }) { HomeworkDetail(it, ui, viewModel) } }
                         Route.MESSAGE_DETAIL -> ui.data.messages.firstOrNull { it.id == selectedId }?.let { MessageDetailScreen(it, ui, viewModel) { route = Route.MESSAGES } }
-                    }
                 }
             }
             AnimatedVisibility(
                 visible = ui.error != null,
-                enter = fadeIn(tween(220)) + expandVertically(tween(220)),
-                exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+                enter = fadeIn(tween(120)),
+                exit = fadeOut(tween(80))
             ) {
                 ui.error?.let {
                     ErrorCard(
@@ -339,29 +332,59 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
 
 @Composable
 private fun BottomBar(route: Route, language: AppLanguage, select: (Route) -> Unit) {
-    val items = listOf(
-        Triple(Route.HOME, language.text("Home", "Główna"), Icons.Default.Home),
-        Triple(Route.GRADES, language.text("Grades", "Oceny"), Icons.Default.Grade),
-        Triple(Route.SCHEDULE, language.text("Schedule", "Plan"), Icons.Default.CalendarMonth),
-        Triple(Route.MESSAGES, language.text("Messages", "Wiadomości"), Icons.Default.Email),
-        Triple(Route.MORE, language.text("More", "Więcej"), Icons.Default.MoreHoriz)
-    )
+    val items = remember(language) {
+        listOf(
+            Triple(Route.HOME, language.text("Home", "Główna"), Icons.Default.Home),
+            Triple(Route.GRADES, language.text("Grades", "Oceny"), Icons.Default.Grade),
+            Triple(Route.SCHEDULE, language.text("Schedule", "Plan"), Icons.Default.CalendarMonth),
+            Triple(Route.MESSAGES, language.text("Messages", "Wiadomości"), Icons.Default.Email),
+            Triple(Route.MORE, language.text("More", "Więcej"), Icons.Default.MoreHoriz)
+        )
+    }
     NavigationBar {
         items.forEach { (itemRoute, label, icon) ->
-            NavigationBarItem(
-                selected = route == itemRoute,
-                onClick = { select(itemRoute) },
-                icon = { Icon(icon, label) },
-                label = {
+            val selected = route == itemRoute
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { select(itemRoute) }
+                    )
+                    .semantics {
+                        this.selected = selected
+                        role = Role.Tab
+                    }
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                            shape = RoundedCornerShape(24.dp)
+                        )
+                        .padding(vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Icon(
+                        icon,
+                        label,
+                        tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         label,
                         maxLines = 1,
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.labelSmall
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            )
+            }
         }
     }
 }
@@ -434,7 +457,7 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
 private fun ErrorCard(message: String, language: AppLanguage, onRetry: (() -> Unit)? = null, modifier: Modifier = Modifier) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-        modifier = modifier.fillMaxWidth().animateContentSize(tween(220))
+        modifier = modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
@@ -492,14 +515,14 @@ private fun TodayCard(ui: SchoolUiState, viewModel: SchoolViewModel, openLesson:
     val now = LocalTime.now()
     val lessons = ui.data.timetable?.days?.get(dayKey).orEmpty()
     val remaining = lessons.filter { (it.endMinutes()?.let { m -> m > now.hour * 60 + now.minute } ?: true) }
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), modifier = Modifier.fillMaxWidth().animateContentSize(tween(260))) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(lang.text("Today", "Dzisiaj"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(today.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
-                AnimatedContent(targetState = remaining.size, transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) }, label = "remaining-lessons") { count ->
+                AnimatedContent(targetState = remaining.size, transitionSpec = { (fadeIn(tween(100)) togetherWith fadeOut(tween(70))).using(null) }, label = "remaining-lessons") { count ->
                     Text("$count ${lang.text("left", "pozostało")}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
             }
@@ -527,7 +550,8 @@ private fun SummaryCard(title: String, value: String, icon: ImageVector, color: 
 private fun GradesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (String) -> Unit) {
     var semester by rememberSaveable { mutableStateOf(GradeSemester.FIRST) }
     val lang = ui.language
-    val filtered = ui.data.grades.filter { it.belongsTo(semester) }
+    val filtered = remember(ui.data.grades, semester) { ui.data.grades.filter { it.belongsTo(semester) } }
+    val gradesBySubject = remember(filtered) { filtered.groupBy { it.subject }.toSortedMap() }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("Grades", "Oceny"))
         ScrollableTabRow(selectedTabIndex = semester.ordinal, edgePadding = 16.dp) {
@@ -538,7 +562,7 @@ private fun GradesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (S
         LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item { Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(lang.text("Average", "Średnia"), color = MaterialTheme.colorScheme.onSurfaceVariant); Text(filtered.averageAcrossSubjects()?.let { "%.2f".format(it) } ?: "—", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }; Text("${filtered.size} ${lang.text("grades", "ocen")}", color = MaterialTheme.colorScheme.onSurfaceVariant) } } }
             if (filtered.isEmpty()) item { EmptyState(lang.text("No grades", "Brak ocen"), lang.text("No data for this semester.", "Brak danych dla tego półrocza."), Icons.Default.MenuBook) }
-            ui.data.grades.filter { it.belongsTo(semester) }.groupBy { it.subject }.toSortedMap().forEach { (subject, grades) ->
+            gradesBySubject.forEach { (subject, grades) ->
                 item { Text("$subject  ·  ${grades.numericAverage()?.let { "%.2f".format(it) } ?: "—"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp)) }
                 items(grades, key = { it.id }) { grade -> GradeRow(grade, lang) { open(grade.id) } }
             }
