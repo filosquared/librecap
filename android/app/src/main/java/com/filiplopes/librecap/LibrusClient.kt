@@ -148,7 +148,9 @@ class LibrusClient {
             val addedDate = raw.string("AddDate")
             GradeRecord(
                 id = raw.string("Id").ifEmpty { "$subjectId-$addedDate-${raw.string("Grade")}-$index" },
-                subject = subjects[subjectId] ?: "Subject",
+                subject = subjects[subjectId]
+                    ?: subjectName(raw.obj("Subject"), raw.firstString("SubjectName", "SubjectTitle"))
+                        .ifBlank { "Unknown subject" },
                 value = raw.string("Grade", "—"),
                 weight = category.second,
                 comment = comments[commentId] ?: "",
@@ -213,7 +215,7 @@ class LibrusClient {
                     .takeIf { it.isNotBlank() && !it.equals(teacherName(lesson.obj("Teacher")), ignoreCase = true) }
                 val hourFrom = lesson.string("HourFrom")
                 val lessonNumber = lesson.string("LessonNo", "-")
-                val apiSubject = lesson.obj("Subject").string("Name", "Lesson")
+                val apiSubject = subjectName(lesson.obj("Subject"), "Lesson")
                 val apiTeacher = teacherName(lesson.obj("Teacher"))
                 val substitution = substitutionDetails["$dateKey-$hourFrom"]
                 val replacementSubject = substitution?.subject?.takeIf(String::isNotBlank)
@@ -283,7 +285,8 @@ class LibrusClient {
             val type = types[raw.obj("Type").string("Id")] ?: AttendanceType("Attendance", "?", false)
             AttendanceRecord(
                 id = raw.string("Id").ifEmpty { "attendance-$index" },
-                subject = subjects[lessons[raw.obj("Lesson").string("Id")] ?: ""] ?: "Lesson",
+                subject = subjects[lessons[raw.obj("Lesson").string("Id")] ?: ""]
+                    ?: subjectName(raw.obj("Lesson").obj("Subject"), "Lesson"),
                 type = type.name,
                 shortType = type.short,
                 isPresence = type.isPresence,
@@ -303,7 +306,8 @@ class LibrusClient {
             val category = categories[raw.obj("Category").string("Id")] ?: "Homework"
             HomeworkRecord(
                 id = raw.string("Id").ifEmpty { "homework-$index" },
-                subject = subjects[raw.obj("Subject").string("Id")] ?: "Lesson ${raw.string("LessonNo")}",
+                subject = subjects[raw.obj("Subject").string("Id")]
+                    ?: subjectName(raw.obj("Subject"), "Lesson ${raw.string("LessonNo")}"),
                 addedBy = teacherName(teachers[raw.obj("CreatedBy").string("Id")] ?: JsonObject()),
                 type = category,
                 startTime = raw.string("TimeFrom"),
@@ -762,7 +766,18 @@ class LibrusClient {
     }.getOrDefault("unknown")
 
     private fun userMap(objectValue: JsonObject): Map<String, JsonObject> = objectValue.array("Users").associateBy { it.string("Id") }
-    private fun subjectMap(objectValue: JsonObject): Map<String, String> = objectValue.array("Subjects").associate { it.string("Id") to it.string("Name", "Subject") }
+    private fun subjectMap(objectValue: JsonObject): Map<String, String> = objectValue.array("Subjects")
+        .mapNotNull { subject ->
+            val id = subject.string("Id").trim()
+            val name = subjectName(subject)
+            if (id.isBlank() || name.isBlank()) null else id to name
+        }
+        .toMap()
+    private fun subjectName(subject: JsonObject, fallback: String = ""): String = subject
+        .firstString("Name", "FullName", "SubjectName", "ShortName", "Symbol", "Title")
+        .takeUnless { it.equals("Subject", ignoreCase = true) }
+        .orEmpty()
+        .ifBlank { fallback }
     private fun gradeCategories(objectValue: JsonObject): Map<String, Pair<String, String>> = objectValue.array("Categories").associate { it.string("Id") to (it.string("Name", "Grade") to it.string("Weight", "none")) }
     private fun homeworkCategoryMap(objectValue: JsonObject): Map<String, String> = objectValue.array("Categories").associate { it.string("Id") to it.string("Name", "Homework") }
     private fun commentMap(objectValue: JsonObject): Map<String, String> = objectValue.array("Comments").associate { it.string("Id") to it.string("Text") }

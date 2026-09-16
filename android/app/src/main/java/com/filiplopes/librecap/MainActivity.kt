@@ -173,7 +173,7 @@ private fun LibreCapTheme(appearance: AppAppearance, content: @Composable () -> 
 private fun LibreCapRoot(viewModel: SchoolViewModel) {
     val ui = viewModel.state.value
     LibreCapTheme(ui.appearance) {
-        Surface(modifier = Modifier.fillMaxSize()) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             val root = when {
                 !ui.ready -> RootScreen.LOADING
                 !ui.authenticated -> RootScreen.LOGIN
@@ -203,7 +203,7 @@ private enum class RootScreen { LOADING, LOGIN, APP }
 
 @Composable
 private fun LoadingScreen(language: AppLanguage) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface), contentAlignment = Alignment.Center) {
         Text(language.text("Connecting…", "Łączenie…"), style = MaterialTheme.typography.titleMedium)
     }
 }
@@ -539,7 +539,7 @@ private fun GradesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (S
             item { Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(lang.text("Average", "Średnia"), color = MaterialTheme.colorScheme.onSurfaceVariant); Text(filtered.averageAcrossSubjects()?.let { "%.2f".format(it) } ?: "—", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }; Text("${filtered.size} ${lang.text("grades", "ocen")}", color = MaterialTheme.colorScheme.onSurfaceVariant) } } }
             if (filtered.isEmpty()) item { EmptyState(lang.text("No grades", "Brak ocen"), lang.text("No data for this semester.", "Brak danych dla tego półrocza."), Icons.Default.MenuBook) }
             ui.data.grades.filter { it.belongsTo(semester) }.groupBy { it.subject }.toSortedMap().forEach { (subject, grades) ->
-                item { Text("$" + "subject  ·  ${grades.numericAverage()?.let { "%.2f".format(it) } ?: "—"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp)) }
+                item { Text("$subject  ·  ${grades.numericAverage()?.let { "%.2f".format(it) } ?: "—"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp)) }
                 items(grades, key = { it.id }) { grade -> GradeRow(grade, lang) { open(grade.id) } }
             }
         }

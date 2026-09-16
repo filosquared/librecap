@@ -3,9 +3,10 @@
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">@color/librecap_indigo</item>
         <item name="android:windowBackground">@color/librecap_splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/librecap_splash_background</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

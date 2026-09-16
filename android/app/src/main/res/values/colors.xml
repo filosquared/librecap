@@ -2,4 +2,5 @@
     <color name="librecap_indigo">#4657D6</color>
     <color name="librecap_icon_background">#549DFF</color>
     <color name="librecap_icon_foreground">#061526</color>
+    <color name="librecap_splash_background">#1B1B1F</color>
 </resources>

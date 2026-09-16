@@ -170,7 +170,13 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
 
         refreshed = refreshed.copy(lastSync = Instant.now().toString())
         val savedLocally = localStore.save(refreshed)
-        val displayError = firstError?.let { friendlyError(it, "Some school data could not be refreshed. Try again.") }
+        val displayError = firstError?.let {
+            friendlyError(
+                it,
+                "Some school data could not be refreshed. Try again.",
+                hasCachedData = refreshed.profile != null || refreshed.grades.isNotEmpty() || refreshed.timetable != null
+            )
+        }
         update {
             it.copy(
                 data = refreshed,
@@ -200,7 +206,11 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
                         ready = true,
                         authenticated = it.authenticated && !invalidCredentials,
                         syncing = false,
-                        error = friendlyError(error, if (it.authenticated) "Saved data is available, but syncing failed. Try again." else "Please sign in again.")
+                        error = friendlyError(
+                            error,
+                            if (it.authenticated) "Saved data is available, but syncing failed. Try again." else "Please sign in again.",
+                            hasCachedData = it.data.profile != null || it.data.grades.isNotEmpty() || it.data.timetable != null
+                        )
                     )
                 }
             }
@@ -321,7 +331,9 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun Throwable?.isInvalidCredentials(): Boolean = this is LibrusClientError && kind == LibrusErrorKind.INVALID_CREDENTIALS
 
-    private fun friendlyError(error: Throwable, fallback: String): String = when {
+    private fun friendlyError(error: Throwable, fallback: String, hasCachedData: Boolean = false): String = when {
+        error is LibrusClientError && error.kind == LibrusErrorKind.UNAVAILABLE && hasCachedData ->
+            "Librus is temporarily unavailable. Showing saved data from your last sync. Try again later."
         error is LibrusClientError -> error.message ?: fallback
         error is UnknownHostException -> "No internet connection. Check your network and try again."
         error is SocketTimeoutException -> "Librus took too long to respond. Check your connection and try again."
