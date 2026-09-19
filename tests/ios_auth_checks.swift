@@ -77,7 +77,6 @@ final class MessageAttachmentFixtureProtocol: URLProtocol {
         case "/wiadomosci/pobierz_zalacznik/notes":
             body = Data("notes file".utf8)
             mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            headerFields["Content-Disposition"] = "attachment; filename=\"notes.docx\""
         case "/wiadomosci/pobierz_zalacznik/login":
             body = Data("<form><input name=\"login\"><input type=\"password\"></form>".utf8)
             mimeType = "text/html"
@@ -149,15 +148,22 @@ final class MessageAttachmentFixtureProtocol: URLProtocol {
         precondition(message.attachments.count == 2)
         precondition(message.attachments[0].name == "report.pdf")
         precondition(message.attachments[0].source == "/wiadomosci/pobierz_zalacznik/file")
-        precondition(message.attachments[0].browserURL?.absoluteString == "https://synergia.librus.pl/wiadomosci/pobierz_zalacznik/file")
+        precondition(message.attachments[0].downloadURL?.absoluteString == "https://synergia.librus.pl/wiadomosci/pobierz_zalacznik/file")
         precondition(message.attachments[1].name == "notes.docx")
         precondition(message.attachments[1].source == "/wiadomosci/pobierz_zalacznik/notes")
-        precondition(message.attachments[1].browserURL?.absoluteString == "https://synergia.librus.pl/wiadomosci/pobierz_zalacznik/notes")
+        precondition(message.attachments[1].downloadURL?.absoluteString == "https://synergia.librus.pl/wiadomosci/pobierz_zalacznik/notes")
 
         let downloaded = try await messageClient.downloadMessageAttachment(message.attachments[0])
         precondition(downloaded.fileName == "report.pdf")
-        precondition(try Data(contentsOf: downloaded.fileURL) == Data("fixture file".utf8))
+        let downloadedData = try Data(contentsOf: downloaded.fileURL)
+        precondition(downloadedData == Data("fixture file".utf8))
         try? FileManager.default.removeItem(at: downloaded.fileURL)
+
+        let fallbackDownload = try await messageClient.downloadMessageAttachment(message.attachments[1])
+        precondition(fallbackDownload.fileName == "notes.docx")
+        let fallbackData = try Data(contentsOf: fallbackDownload.fileURL)
+        precondition(fallbackData == Data("notes file".utf8))
+        try? FileManager.default.removeItem(at: fallbackDownload.fileURL)
 
         do {
             _ = try await messageClient.downloadMessageAttachment(

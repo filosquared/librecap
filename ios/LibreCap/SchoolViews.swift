@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct GradesView: View {
@@ -533,6 +534,10 @@ private struct MessageDetailView: View {
     let summary: MessageSummary
     @State private var detail: MessageDetail?
     @State private var isLoading = true
+    @State private var downloadingAttachmentID: String?
+    @State private var downloadedAttachmentID: String?
+    @State private var downloadedAttachment: DownloadedMessageAttachment?
+    @State private var attachmentError: String?
 
     var body: some View {
         ScrollView {
@@ -545,6 +550,62 @@ private struct MessageDetailView: View {
                     Text(detail.content.isEmpty ? settings.text(.noData) : detail.content)
                         .font(.body)
                         .textSelection(.enabled)
+                    if let attachmentError {
+                        Text(attachmentError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                    if !detail.attachments.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(settings.text(.attachments))
+                                .font(.headline)
+                            ForEach(detail.attachments) { attachment in
+                                HStack(spacing: 12) {
+                                    Image(systemName: "paperclip")
+                                        .foregroundStyle(.secondary)
+                                    Text(attachment.name)
+                                        .lineLimit(2)
+                                    Spacer(minLength: 8)
+                                    if attachment.downloadURL != nil {
+                                        if downloadedAttachmentID == attachment.id,
+                                           let downloadedAttachment {
+                                            ShareLink(item: downloadedAttachment.fileURL) {
+                                                Label(settings.text(.saveFile), systemImage: "square.and.arrow.down")
+                                            }
+                                            .buttonStyle(.bordered)
+                                        } else if downloadingAttachmentID == attachment.id {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Button {
+                                                Task {
+                                                    downloadingAttachmentID = attachment.id
+                                                    attachmentError = nil
+                                                    do {
+                                                        downloadedAttachment = try await model.downloadMessageAttachment(attachment)
+                                                        downloadedAttachmentID = attachment.id
+                                                    } catch is CancellationError {
+                                                    } catch {
+                                                        attachmentError = error.localizedDescription
+                                                    }
+                                                    downloadingAttachmentID = nil
+                                                }
+                                            } label: {
+                                                Label(settings.text(.download), systemImage: "arrow.down.circle")
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .disabled(downloadingAttachmentID != nil)
+                                        }
+                                    } else {
+                                        Label(settings.text(.download), systemImage: "link.badge.plus")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(12)
+                                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    }
                 } else {
                     EmptyState(title: settings.text(.noMessages), message: settings.text(.folderUnavailable), icon: "envelope.badge.exclamationmark")
                 }
@@ -567,6 +628,7 @@ private struct MessageDetailView: View {
         }
         isLoading = false
     }
+
 }
 
 struct MoreView: View {
@@ -585,6 +647,11 @@ struct MoreView: View {
                 }
                 #if os(iOS)
                 PhoneWatchStatusView(sync: model.watchSync)
+                Section {
+                    Link(destination: URL(string: "https://github.com/filosquared/librecap")!) {
+                        Label(settings.text(.github), systemImage: "chevron.left.forwardslash.chevron.right")
+                    }
+                }
                 #endif
                 Section(settings.text(.account)) {
                     Button(role: .destructive, action: model.logout) {

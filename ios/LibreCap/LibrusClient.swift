@@ -445,8 +445,48 @@ final class LibrusClient {
             subject: subject.isEmpty ? "Message" : subject,
             sender: "",
             date: "",
-            content: htmlText(content)
+            content: htmlText(content),
+            attachments: messageAttachments(from: html)
         )
+    }
+
+    func downloadMessageAttachment(_ attachment: MessageAttachment) async throws -> DownloadedMessageAttachment {
+        guard let url = attachment.downloadURL else {
+            throw LibrusClientError.malformedData
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue(portalBase.absoluteString + "/wiadomosci/", forHTTPHeaderField: "Referer")
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LibrusClientError.unexpectedResponse
+        }
+
+        if isLoginRedirect(data: data, response: httpResponse) {
+            throw LibrusClientError.sessionUnauthorized
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw responseError(httpResponse, operation: "downloading a message attachment")
+        }
+        guard httpResponse.mimeType?.lowercased().contains("html") != true else {
+            throw LibrusClientError.unexpectedResponse
+        }
+
+        let fileName = attachmentFileName(from: httpResponse, fallback: attachment.name)
+        let safeFileName = (fileName as NSString).lastPathComponent.isEmpty
+            ? "Attachment"
+            : (fileName as NSString).lastPathComponent
+        let fileDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: fileDirectory, withIntermediateDirectories: true)
+            let fileURL = fileDirectory.appendingPathComponent(safeFileName)
+            try data.write(to: fileURL, options: .atomic)
+            return DownloadedMessageAttachment(fileURL: fileURL, fileName: safeFileName)
+        } catch {
+            throw LibrusClientError.unavailable
+        }
     }
 
     private struct SubstitutionDetails {
@@ -816,6 +856,79 @@ final class LibrusClient {
         return path.split(separator: "?").first.map(String.init)?.replacingOccurrences(of: "/", with: "-") ?? ""
     }
 
+    private func messageAttachments(from html: String) -> [MessageAttachment] {
+        let normalizedHTML = decodeHTMLEntities(html).replacingOccurrences(of: "\\/", with: "/")
+        let pattern = #"(?:https://synergia\.librus\.pl)?/wiadomosci/pobierz_zalacznik/[^"'\s<>)]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        let htmlRange = NSRange(normalizedHTML.startIndex..<normalizedHTML.endIndex, in: normalizedHTML)
+        let nsHTML = normalizedHTML as NSString
+        var seenSources = Set<String>()
+        var attachments: [MessageAttachment] = []
+
+        for match in regex.matches(in: normalizedHTML, range: htmlRange) {
+            let source = String(normalizedHTML[Range(match.range, in: normalizedHTML)!])
+                .replacingOccurrences(of: "\\", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: source, relativeTo: portalBase)?.absoluteURL,
+                  url.scheme == "https",
+                  url.host == portalBase.host,
+                  url.path.lowercased().contains("/pobierz_zalacznik/") else {
+                continue
+            }
+
+            let rowStart = nsHTML.range(
+                of: "<tr",
+                options: [.caseInsensitive, .backwards],
+                range: NSRange(location: 0, length: match.range.location)
+            )
+            let rowEnd = nsHTML.range(
+                of: "</tr>",
+                options: [.caseInsensitive],
+                range: NSRange(location: match.range.location, length: nsHTML.length - match.range.location)
+            )
+            guard rowStart.location != NSNotFound, rowEnd.location != NSNotFound else { continue }
+
+            let row = nsHTML.substring(
+                with: NSRange(
+                    location: rowStart.location,
+                    length: rowEnd.location + rowEnd.length - rowStart.location
+                )
+            )
+            let name = allCaptures(#"<td[^>]*>(.*?)</td>"#, in: row)
+                .map(htmlText)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { $0.contains(".") && !$0.isEmpty }
+                ?? attachmentFileName(from: url)
+            guard seenSources.insert(source).inserted else { continue }
+            attachments.append(MessageAttachment(name: name, source: source))
+        }
+        return attachments
+    }
+
+    private func attachmentFileName(from url: URL) -> String {
+        let component = url.path
+            .split(separator: "/")
+            .last
+            .map(String.init)?
+            .removingPercentEncoding ?? ""
+        return component.isEmpty ? "Attachment" : component
+    }
+
+    private func attachmentFileName(from response: HTTPURLResponse, fallback: String) -> String {
+        let header = response.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        if let match = try? NSRegularExpression(pattern: #"filename\*?=(?:UTF-8''|\")?([^\";]+)"#, options: .caseInsensitive)
+            .firstMatch(in: header, range: NSRange(header.startIndex..<header.endIndex, in: header)),
+           let range = Range(match.range(at: 1), in: header) {
+            let value = String(header[range]).removingPercentEncoding ?? String(header[range])
+            let name = (value as NSString).lastPathComponent
+            if !name.isEmpty { return name }
+        }
+        return fallback.isEmpty ? "Attachment" : fallback
+    }
+
     private func capture(_ pattern: String, in text: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return nil }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
@@ -861,6 +974,17 @@ final class LibrusClient {
         return withoutScripts.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: "&nbsp;", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func decodeHTMLEntities(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#34;", with: "\"")
+            .replacingOccurrences(of: "&#x22;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&#x27;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 }
 

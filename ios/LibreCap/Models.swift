@@ -150,11 +150,42 @@ struct MessageSummary: Codable, Hashable, Identifiable {
     }
 }
 
+struct MessageAttachment: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    var source: String
+
+    var downloadURL: URL? {
+        guard let url = URL(string: source, relativeTo: Self.portalBase)?.absoluteURL,
+              url.scheme == "https",
+              Self.allowedHosts.contains(url.host ?? ""),
+              url.path.lowercased().contains("/wiadomosci/pobierz_zalacznik/") else {
+            return nil
+        }
+        return url
+    }
+
+    init(name: String, source: String) {
+        self.id = source
+        self.name = name
+        self.source = source
+    }
+
+    private static let portalBase = URL(string: "https://synergia.librus.pl")!
+    private static let allowedHosts = ["synergia.librus.pl", "sandbox.librus.pl"]
+}
+
+struct DownloadedMessageAttachment {
+    var fileURL: URL
+    var fileName: String
+}
+
 struct MessageDetail: Codable, Hashable {
     var subject: String
     var sender: String
     var date: String
     var content: String
+    var attachments: [MessageAttachment] = []
 }
 
 struct SchoolNote: Codable, Hashable, Identifiable {

@@ -48,6 +48,9 @@ enum LibrusClientError: Error, Equatable {
     func fetchHomeworks() async throws -> [HomeworkRecord] { [] }
     func fetchMessages() async throws -> [MessageSummary] { [] }
     func fetchMessage(id: String) async throws -> MessageDetail { MessageDetail(subject: "", sender: "", date: "", content: "") }
+    func downloadMessageAttachment(_ attachment: MessageAttachment) async throws -> DownloadedMessageAttachment {
+        fatalError("Attachment downloads are not part of the AppModel lifecycle fixture")
+    }
 }
 
 struct NoopReleaseProvider: GitHubReleaseProviding {
