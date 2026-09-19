@@ -16,7 +16,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,6 +47,8 @@ import androidx.compose.material.icons.filled.AssignmentLate
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -112,6 +116,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.Role
@@ -119,10 +124,13 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.core.view.WindowCompat
+import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
+import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -567,7 +575,7 @@ private fun TodayCard(ui: SchoolUiState, viewModel: SchoolViewModel, openLesson:
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(lang.text("Today", "Dzisiaj"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(lang.text("Today", "Dzi\u015b"))
                     Text(today.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
                 AnimatedContent(targetState = remaining.size, transitionSpec = { (fadeIn(tween(100)) togetherWith fadeOut(tween(70))).using(null) }, label = "remaining-lessons") { count ->
@@ -652,35 +660,188 @@ private fun GradeDetail(grade: GradeRecord, language: AppLanguage) {
 @Composable
 private fun ScheduleScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (String) -> Unit) {
     val lang = ui.language
-    val dayOrder = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-    val days = dayOrder.filter { ui.data.timetable?.days?.containsKey(it) == true }
-    var selectedDay by rememberSaveable { mutableStateOf(LocalDate.now().dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)) }
-    var expanded by remember { mutableStateOf(false) }
-    val actualDay = selectedDay.takeIf { it in days } ?: days.firstOrNull()
+    val locale = if (lang == AppLanguage.POLISH) Locale("pl") else Locale.ENGLISH
+    val calendarToday = LocalDate.now()
+    val today = when (calendarToday.dayOfWeek) {
+        DayOfWeek.SATURDAY, DayOfWeek.SUNDAY -> calendarToday.with(TemporalAdjusters.next(DayOfWeek.MONDAY))
+        else -> calendarToday
+    }
+    var selectedDateText by rememberSaveable { mutableStateOf(today.toString()) }
+    val selectedDate = remember(selectedDateText) {
+        runCatching { LocalDate.parse(selectedDateText) }.getOrDefault(today).let { date ->
+            if (date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY) {
+                date.with(TemporalAdjusters.next(DayOfWeek.MONDAY))
+            } else {
+                date
+            }
+        }
+    }
+    val weekStart = selectedDate.with(DayOfWeek.MONDAY)
+    val weekDays = remember(weekStart) { (0..4).map { weekStart.plusDays(it.toLong()) } }
+    val month = YearMonth.from(selectedDate)
+    var monthMenuExpanded by remember { mutableStateOf(false) }
+    val monthChoices = remember(month) {
+        (-6..6).map { month.plusMonths(it.toLong()) }
+    }
+    val weekLabelFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMM", locale) }
+    val monthLabelFormatter = remember(locale) { DateTimeFormatter.ofPattern("LLLL yyyy", locale) }
+    val timetable = ui.data.timetableWeeks[weekStart.toString()]
+        ?: ui.data.timetable?.takeIf { it.weekStart == weekStart.toString() }
+    val dayKey = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)
+    val lessons = timetable?.days?.get(dayKey).orEmpty().filter {
+        it.effectiveDate.isBlank() || it.effectiveDate == selectedDate.toString()
+    }
+
+    LaunchedEffect(weekStart, ui.authenticated, ui.ready, ui.syncing) {
+        if (ui.ready && !ui.syncing) viewModel.loadTimetableWeek(weekStart)
+    }
+
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("Schedule", "Plan lekcji"))
-        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             item {
-                Box {
-                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text(actualDay?.dayLabel(lang) ?: lang.text("Select day", "Wybierz dzień"), Modifier.weight(1f)); Icon(Icons.Default.ArrowDropDown, null) }
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) { days.forEach { day -> DropdownMenuItem(text = { Text(day.dayLabel(lang)) }, onClick = { selectedDay = day; expanded = false }) } }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { selectedDateText = selectedDate.minusWeeks(1).toString() }) {
+                        Icon(Icons.Default.ChevronLeft, lang.text("Previous week", "Poprzedni tydzie\u0144"))
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(lang.text("Week", "Tydzie\u0144"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "${weekStart.format(weekLabelFormatter)} - ${weekStart.plusDays(6).format(weekLabelFormatter)}",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            TextButton(onClick = { monthMenuExpanded = true }) {
+                                Text(month.format(monthLabelFormatter))
+                            }
+                            DropdownMenu(
+                                expanded = monthMenuExpanded,
+                                onDismissRequest = { monthMenuExpanded = false }
+                            ) {
+                                monthChoices.forEach { choice ->
+                                    DropdownMenuItem(
+                                        text = { Text(choice.format(monthLabelFormatter)) },
+                                        onClick = {
+                                            selectedDateText = choice.atDay(1).toString()
+                                            monthMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    IconButton(onClick = { selectedDateText = selectedDate.plusWeeks(1).toString() }) {
+                        Icon(Icons.Default.ChevronRight, lang.text("Next week", "Nast\u0119pny tydzie\u0144"))
+                    }
+                    TextButton(onClick = { selectedDateText = today.toString() }) {
+                        Text(lang.text("Today", "Dzi\u015b"))
+                    }
                 }
             }
-            val lessons = ui.data.timetable?.days?.get(actualDay).orEmpty()
-            if (lessons.isEmpty()) item { EmptyState(lang.text("No lessons", "Brak lekcji"), lang.text("Refresh to load the timetable.", "Odśwież dane, aby pobrać plan."), Icons.Default.CalendarMonth) }
-            items(lessons, key = { it.id }) { lesson -> LessonRow(lesson, ui, viewModel) { open(lesson.id) } }
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    weekDays.forEach { day ->
+                        val selected = day == selectedDate
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(64.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primaryContainer
+                                    else Color.Transparent
+                                )
+                                .clickable(role = Role.Tab) { selectedDateText = day.toString() }
+                                .semantics {
+                                    this.selected = selected
+                                    role = Role.Tab
+                                }
+                                .padding(vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                day.dayOfWeek.getDisplayName(TextStyle.SHORT, locale),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                day.dayOfMonth.toString(),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .width(24.dp)
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(
+                                        if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+                                    )
+                            )
+                        }
+                    }
+                }
+            }
+            if (ui.scheduleLoading) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(lang.text("Loading this week...", "\u0141adowanie tygodnia..."), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            ui.scheduleError?.let { error ->
+                item { Text(error, color = MaterialTheme.colorScheme.error) }
+            }
+            if (lessons.isEmpty() && !ui.scheduleLoading) {
+                item {
+                    EmptyState(
+                        lang.text("No lessons", "Brak lekcji"),
+                        lang.text("Choose another day or week.", "Wybierz inny dzie\u0144 lub tydzie\u0144."),
+                        Icons.Default.CalendarMonth
+                    )
+                }
+            }
+            items(lessons, key = { it.id }) { lesson ->
+                LessonRow(lesson, ui, viewModel) { open(lesson.id) }
+            }
         }
     }
 }
-
 @Composable
 private fun LessonRow(lesson: TimetableLesson, ui: SchoolUiState, viewModel: SchoolViewModel, onClick: (() -> Unit)? = null) {
+    val relatedHomeworks = ui.data.homeworks.filter { it.matchesLesson(lesson) }
     Card(onClick = { onClick?.invoke() }, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.width(50.dp)) { Text(lesson.hourFrom, fontWeight = FontWeight.SemiBold); Text(lesson.hourTo, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Divider(Modifier.height(42.dp).width(1.dp).padding(horizontal = 4.dp))
             Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                Text(lesson.displaySubject, fontWeight = FontWeight.Medium)
+                Text(
+                    lesson.displaySubject,
+                    fontWeight = FontWeight.Medium,
+                    textDecoration = if (lesson.isCancelled) TextDecoration.LineThrough else TextDecoration.None
+                )
                 val teacherText = when {
                     lesson.teacher.isNotBlank() && lesson.hasOriginalTeacher ->
                         "${lesson.teacher} > ${lesson.originalTeacher}"
@@ -689,6 +850,14 @@ private fun LessonRow(lesson: TimetableLesson, ui: SchoolUiState, viewModel: Sch
                     else -> ""
                 }
                 Text(listOf(teacherText, lesson.classroom.takeIf { it != "—" }.orEmpty()).filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                relatedHomeworks.forEach { homework ->
+                    Text(
+                        homework.displayType,
+                        color = Color(0xFF8455C7),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
                 if (lesson.isCancelled || lesson.isSubstitution) Text(if (lesson.isCancelled) ui.language.text("Cancelled", "Odwołana") else ui.language.text("Substitution", "Zastępstwo"), color = if (lesson.isCancelled) MaterialTheme.colorScheme.error else Color(0xFFE78225), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             if (viewModel.note(lesson.id) != null) Icon(Icons.Default.NoteAlt, ui.language.text("Note", "Notatka"), tint = MaterialTheme.colorScheme.primary)
@@ -698,6 +867,7 @@ private fun LessonRow(lesson: TimetableLesson, ui: SchoolUiState, viewModel: Sch
 
 @Composable
 private fun LessonDetail(lesson: TimetableLesson, ui: SchoolUiState, viewModel: SchoolViewModel) {
+    val relatedHomeworks = ui.data.homeworks.filter { it.matchesLesson(lesson) }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         item { DetailRow(ui.language.text("Lesson", "Lekcja"), lesson.lessonNumber) }
         item { DetailRow(ui.language.text("Subject", "Przedmiot"), lesson.displaySubject) }
@@ -706,6 +876,13 @@ private fun LessonDetail(lesson: TimetableLesson, ui: SchoolUiState, viewModel: 
         item { DetailRow(ui.language.text("Teacher", "Nauczyciel"), lesson.teacher) }
         if (lesson.hasOriginalTeacher) item { DetailRow(ui.language.text("Replaced teacher", "Zastąpiony nauczyciel"), lesson.originalTeacher.orEmpty()) }
         if (lesson.isCancelled || lesson.isSubstitution) item { Text(if (lesson.isCancelled) ui.language.text("Cancelled", "Odwołana") else ui.language.text("Substitution", "Zastępstwo"), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp)) }
+        relatedHomeworks.forEach { homework ->
+            item { DetailRow(ui.language.text("Event", "Wydarzenie"), homework.displayType) }
+            if (homework.content.isNotBlank()) item {
+                DetailRow(ui.language.text("Scope / teacher's information", "Zakres / informacja od nauczyciela"), homework.content)
+            }
+            if (homework.addedBy.isNotBlank()) item { DetailRow(ui.language.text("Added by", "Dodane przez"), homework.addedBy) }
+        }
         item { Text(ui.language.text("Note", "Notatka"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 20.dp)) }
         item { NoteEditor(lesson.id, ui, viewModel) }
     }
@@ -922,7 +1099,9 @@ private fun MessageDetailScreen(summary: MessageSummary, ui: SchoolUiState, view
             item {
                 if (summary.folder == MessageFolder.ANNOUNCEMENTS || summary.folder == MessageFolder.NOTES) {
                     Text(summary.content.ifBlank { ui.language.text("No content.", "Brak treści.") })
-                } else if (detail == null) {
+                } else if (ui.messageDetailError != null) {
+                    Text(ui.messageDetailError, color = MaterialTheme.colorScheme.error)
+                } else if (ui.loadingMessage || detail == null) {
                     Text(ui.language.text("Loading message…", "Wczytywanie wiadomości…"), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     Text(detail.content.ifBlank { ui.language.text("No message content.", "Brak treści wiadomości.") })

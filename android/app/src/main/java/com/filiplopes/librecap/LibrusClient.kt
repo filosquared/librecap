@@ -5,6 +5,9 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -15,6 +18,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
+import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
@@ -42,17 +46,29 @@ class LibrusClient {
     private val apiBase = "https://synergia.librus.pl/gateway/api/2.0/"
     private val portalBase = "https://synergia.librus.pl"
     private val oauthHost = "api.librus.pl"
+    private val oauthAuthorizationUrl = "https://api.librus.pl/OAuth/Authorization?client_id=46"
+    private val oauthAuthorizationGrantUrl = "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46"
+    private val oauthAuthorizationWithScopeUrl = "$oauthAuthorizationUrl&response_type=code&scope=mydata"
     private val cookies = InMemoryCookieJar()
     private val http = OkHttpClient.Builder()
         .cookieJar(cookies)
+        .callTimeout(20, TimeUnit.SECONDS)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+    private val oauthHttp = http.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+    suspend fun login(username: String, password: String): StudentProfile {
+        establishSession(username, password)
+        return fetchProfile()
+    }
 
-    fun login(username: String, password: String): StudentProfile {
+    suspend fun establishSession(username: String, password: String) {
         val loginName = username.trim()
         if (loginName.contains("@")) {
             throw LibrusClientError(LibrusErrorKind.ACCOUNT_TYPE, "Use the school-issued Synergia login, not an email address.")
@@ -66,19 +82,33 @@ class LibrusClient {
             headers = mapOf(
                 "Referer" to "https://portal.librus.pl/",
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            )
+            ),
+            client = oauthHttp
         )
-        if (portal.code != 200) throw responseError(portal, "starting the Librus login flow")
-        val authUrl = authorizationUrl(portal.finalUrl)
+        if (portal.code !in 200..399 || portal.location.isBlank()) throw responseError(portal, "starting the Librus login flow")
+        val authUrl = authorizationUrl(portal.location)
+
+        val authorization = request(authUrl, client = oauthHttp)
+        if (authorization.code !in 200..399) throw responseError(authorization, "starting the Librus login flow")
 
         val loginResponse = request(
-            authUrl,
+            oauthAuthorizationGrantUrl,
             method = "POST",
             body = formBody(mapOf("action" to "login", "login" to loginName, "pass" to password)),
             headers = mapOf(
-                "Accept" to "application/json",
-                "Content-Type" to "application/x-www-form-urlencoded"
-            )
+                "Accept" to "*/*",
+                "Accept-Language" to "en-US,en;q=0.9,pl;q=0.8",
+                "Cache-Control" to "no-cache",
+                "Origin" to "https://api.librus.pl",
+                "Pragma" to "no-cache",
+                "Referer" to oauthAuthorizationGrantUrl,
+                "Content-Type" to "application/x-www-form-urlencoded",
+                "Sec-Fetch-Dest" to "empty",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Site" to "same-origin",
+                "X-Requested-With" to "XMLHttpRequest"
+            ),
+            client = oauthHttp
         )
         if (loginResponse.code == 401 || loginResponse.code == 403) {
             throw LibrusClientError(LibrusErrorKind.INVALID_CREDENTIALS, "Librus rejected this sign-in. Check the school-issued Synergia login and password.")
@@ -92,11 +122,18 @@ class LibrusClient {
         if (loginStatus != "ok") {
             throw LibrusClientError(LibrusErrorKind.LOGIN_FLOW, "LibreCap could not complete the Librus login flow. Try again in a moment.")
         }
-        val nextUrl = authorizationUrl(loginJson.string("goTo"))
-        val continuation = request(nextUrl)
-        if (continuation.code !in 200..399) throw responseError(continuation, "completing sign-in")
-        if (URI(continuation.finalUrl).host != URI(portalBase).host) {
-            throw LibrusClientError(LibrusErrorKind.ADDITIONAL_VERIFICATION, "Librus requires an additional verification step on the official Synergia website.")
+        var nextUrl = authorizationUrl(loginJson.string("goTo"), base = oauthAuthorizationWithScopeUrl)
+        var continuation: HttpResult? = null
+        for (redirect in 0 until 10) {
+            val response = request(nextUrl, client = oauthHttp)
+            if (response.code !in 200..399) throw responseError(response, "completing sign-in")
+            continuation = response
+            val location = response.location
+            if (location.isBlank()) break
+            nextUrl = safeOAuthRedirectUrl(location, response.finalUrl)
+        }
+        if (continuation == null || !cookies.hasCookie("oauth_token", URI(portalBase).host)) {
+            throw LibrusClientError(LibrusErrorKind.LOGIN_FLOW, "Librus returned an incomplete login session. Try signing in again.")
         }
 
         val tokenInfo = apiJson("Auth/TokenInfo")
@@ -104,14 +141,16 @@ class LibrusClient {
         if (identifier.isEmpty()) throw LibrusClientError(LibrusErrorKind.MALFORMED_DATA, "Librus returned an incomplete login session. Try signing in again.")
         val access = request("$apiBase/Auth/UserInfo/$identifier")
         if (access.code != 200) throw responseError(access, "authorizing access to your school data")
-        return fetchProfile()
     }
-
-    fun fetchProfile(): StudentProfile {
-        val me = apiJson("Me")
-        val userProfile = apiJson("UserProfile")
-        val users = apiJson("Users")
-        val classes = apiJson("Classes")
+    suspend fun fetchProfile(): StudentProfile = coroutineScope {
+        val meRequest = async(Dispatchers.IO) { apiJson("Me") }
+        val userProfileRequest = async(Dispatchers.IO) { apiJson("UserProfile") }
+        val usersRequest = async(Dispatchers.IO) { apiJson("Users") }
+        val classesRequest = async(Dispatchers.IO) { apiJson("Classes") }
+        val me = meRequest.await()
+        val userProfile = userProfileRequest.await()
+        val users = usersRequest.await()
+        val classes = classesRequest.await()
 
         val account = me.obj("Me").obj("Account")
         val schoolClass = classes.obj("Class")
@@ -120,7 +159,7 @@ class LibrusClient {
         val number = schoolClass.string("Number")
         val symbol = schoolClass.string("Symbol").uppercase(Locale.getDefault())
         val className = listOf(number, symbol).filter(String::isNotEmpty).joinToString(" ")
-        return StudentProfile(
+        StudentProfile(
             firstName = account.string("FirstName", "Student"),
             lastName = account.string("LastName"),
             tutorFirstName = tutor.string("FirstName"),
@@ -164,10 +203,9 @@ class LibrusClient {
         }.sortedBy { it.subject.lowercase(Locale.getDefault()) }
     }
 
-    fun fetchTimetable(): TimetableData {
+    fun fetchTimetable(requestedWeekStart: LocalDate = LocalDate.now().with(DayOfWeek.MONDAY)): TimetableData {
         val today = LocalDate.now()
-        val pivot = today.plusDays(2)
-        val weekStart = pivot.minusDays((pivot.dayOfWeek.value - 1).toLong())
+        val weekStart = requestedWeekStart.with(DayOfWeek.MONDAY)
         val weekEnd = weekStart.plusDays(6)
         val dateFrom = weekStart.format(DATE_FORMAT)
         val dateTo = weekEnd.format(DATE_FORMAT)
@@ -243,7 +281,8 @@ class LibrusClient {
                         hourTo = lesson.string("HourTo"),
                         classroom = replacementClassroom ?: classrooms[classroomId] ?: "—",
                         originalSubject = resolvedOriginalSubject,
-                        originalTeacher = resolvedOriginalTeacher
+                        originalTeacher = resolvedOriginalTeacher,
+                        date = dateKey.take(10)
                     )
                 )
             }
@@ -264,12 +303,13 @@ class LibrusClient {
                     teacher = teacher,
                     hourFrom = item.string("startTime"),
                     hourTo = item.string("endTime"),
-                    classroom = item.obj("classroom").string("symbol", "—")
+                    classroom = item.obj("classroom").string("symbol", "—"),
+                    date = item.string("date").take(10)
                 )
             )
         }
         return TimetableData(
-            nextWeek = today.get(java.time.temporal.IsoFields.WEEK_OF_WEEK_BASED_YEAR) < weekStart.get(java.time.temporal.IsoFields.WEEK_OF_WEEK_BASED_YEAR),
+            nextWeek = weekStart.isAfter(today.with(DayOfWeek.MONDAY)),
             days = lessonsByDay.mapValues { (_, value) -> value.sortedBy { it.hourFrom } },
             weekStart = dateFrom
         )
@@ -314,7 +354,8 @@ class LibrusClient {
                 endTime = raw.string("TimeTo"),
                 date = raw.string("Date"),
                 addedDate = raw.string("AddDate"),
-                content = raw.string("Content")
+                content = raw.string("Content"),
+                lessonNumber = raw.string("LessonNo")
             )
         }.reversed()
     }
@@ -340,7 +381,10 @@ class LibrusClient {
             .distinctBy { it.folder to it.id }
         val notes = pages[MessageFolder.NOTES]?.let(::parseBehaviourNotes) ?: fetchBehaviourNotes()
         Log.d(LOG_TAG, "Messages pages parsed: pages=" + pages.size + ", messages=" + messages.size)
-        return messages + fetchAnnouncements() + notes
+        val announcements = runCatching { fetchAnnouncements() }
+            .onFailure { Log.w(LOG_TAG, "Could not load school notices", it) }
+            .getOrDefault(emptyList())
+        return messages + announcements + notes
     }
 
     fun fetchMessageRecipients(): List<MessageRecipient> {
@@ -677,35 +721,46 @@ class LibrusClient {
         return response.bytes.toString(Charsets.UTF_8)
     }
 
-    private fun request(url: String, method: String = "GET", body: String? = null, headers: Map<String, String> = emptyMap()): HttpResult {
+    private fun request(
+        url: String,
+        method: String = "GET",
+        body: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        client: OkHttpClient = http,
+    ): HttpResult {
         val attempts = when (method) {
             "GET" -> 3
             "POST" -> 2
             else -> 1
         }
+        var lastError: Exception? = null
         repeat(attempts) { attempt ->
             try {
-                val builder = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+                val builder = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
                 headers.forEach { (key, value) -> builder.header(key, value) }
-                if (method == "POST") builder.post((body ?: "").toRequestBody("application/x-www-form-urlencoded".toMediaType()))
-                val response = http.newCall(builder.build()).execute()
+                if (method == "POST") builder.post((body ?: "").toRequestBody("application/x-www-form-urlencoded; charset=UTF-8".toMediaType()))
+                waitForRequestSlot()
+                val response = client.newCall(builder.build()).execute()
                 response.use {
-                    val result = HttpResult(it.code, it.request.url.toString(), it.header("Content-Type").orEmpty(), it.body?.bytes() ?: ByteArray(0))
+                    val result = HttpResult(it.code, it.request.url.toString(), it.header("Content-Type").orEmpty(), it.header("Location").orEmpty(), it.body?.bytes() ?: ByteArray(0))
                     Log.d(LOG_TAG, "${method} ${endpoint(url)} -> ${result.code} ${endpoint(result.finalUrl)} ${result.contentType.substringBefore(';')}")
-                    if (result.code < 500 || attempt + 1 >= attempts) return result
-                    Log.w(LOG_TAG, "Retrying server error for " + method + " " + endpoint(url))
+                    val retryable = result.code == 429 || result.code >= 500
+                    if (!retryable || attempt + 1 >= attempts) return result
+                    Log.w(LOG_TAG, "Retrying server response ${result.code} for " + method + " " + endpoint(url))
+                    Thread.sleep(if (result.code == 429) 5_000L * (attempt + 1) else 1_000L * (attempt + 1))
                 }
-            } catch (_: Exception) {
-                Log.w(LOG_TAG, "Request failed: ${method} ${endpoint(url)} (attempt ${attempt + 1}/${attempts})")
+            } catch (error: Exception) {
+                lastError = error
+                Log.w(LOG_TAG, "Request failed: ${method} ${endpoint(url)} (attempt ${attempt + 1}/${attempts})", error)
                 if (attempt + 1 < attempts) runCatching { Thread.sleep(250L * (attempt + 1)) }
             }
         }
-        throw LibrusClientError(LibrusErrorKind.UNAVAILABLE, "Librus is currently unavailable. Check your internet connection and try again.")
+        throw lastError ?: LibrusClientError(LibrusErrorKind.UNAVAILABLE, "Librus is currently unavailable. Check your internet connection and try again.")
     }
 
-    private fun authorizationUrl(value: String): String {
+    private fun authorizationUrl(value: String, base: String = "https://api.librus.pl/"): String {
         val url = try {
-            URI("https://api.librus.pl/").resolve(value)
+            URI(base).resolve(value)
         } catch (_: Exception) {
             throw LibrusClientError(LibrusErrorKind.LOGIN_FLOW, "LibreCap could not complete the Librus login flow. Try again in a moment.")
         }
@@ -716,11 +771,33 @@ class LibrusClient {
         return url.toString()
     }
 
+    private fun safeOAuthRedirectUrl(value: String, base: String): String {
+        val url = try {
+            URI(base).resolve(value)
+        } catch (_: Exception) {
+            throw LibrusClientError(LibrusErrorKind.LOGIN_FLOW, "Librus returned an invalid login redirect. Try signing in again.")
+        }
+        val isApi = url.host == oauthHost && url.path.startsWith("/OAuth/")
+        val isPortal = url.host == URI(portalBase).host
+        if (url.scheme != "https" || (!isApi && !isPortal) || url.userInfo != null || url.port !in listOf(-1, 443)) {
+            throw LibrusClientError(LibrusErrorKind.LOGIN_FLOW, "Librus returned an unsafe login redirect. Try signing in again.")
+        }
+        return url.toString()
+    }
+
+    private fun waitForRequestSlot() {
+        synchronized(requestPacingLock) {
+            val delay = nextRequestAt - System.currentTimeMillis()
+            if (delay > 0) Thread.sleep(delay)
+            nextRequestAt = System.currentTimeMillis() + REQUEST_INTERVAL_MS
+        }
+    }
+
     private fun formBody(values: Map<String, String>): String = values.toSortedMap().entries.joinToString("&") {
         "${encode(it.key)}=${encode(it.value)}"
     }
 
-    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private fun parseObject(bytes: ByteArray, operation: String): JsonObject {
         val text = bytes.toString(Charsets.UTF_8).trim().removePrefix("\uFEFF").trim()
@@ -748,6 +825,8 @@ class LibrusClient {
     private fun responseError(response: HttpResult, operation: String): LibrusClientError = when {
         response.code == 401 || response.code == 403 -> LibrusClientError(LibrusErrorKind.SESSION_EXPIRED, "Your Librus session expired. LibreCap will try to sign in again.")
         response.code == 429 -> LibrusClientError(LibrusErrorKind.UNAVAILABLE, "Librus is temporarily limiting requests. Wait a moment and try again.")
+        response.bytesAsText().contains("The URL you requested has been blocked", ignoreCase = true) ->
+            LibrusClientError(LibrusErrorKind.UNAVAILABLE, "Librus blocked the sign-in request on its security gateway. Try again later or switch network.")
         response.code >= 500 -> LibrusClientError(LibrusErrorKind.UNAVAILABLE, "Librus is temporarily unavailable while $operation. Try again in a moment.")
         else -> LibrusClientError(LibrusErrorKind.UNEXPECTED_RESPONSE, "Librus returned an unexpected response while $operation. Try again.")
     }
@@ -805,23 +884,32 @@ class LibrusClient {
     private fun parseDate(value: String): LocalDate? = try { LocalDate.parse(value.take(10), DATE_FORMAT) } catch (_: DateTimeParseException) { null }
     private fun messageId(href: String): String = href.substringAfter("wiadomosci/", "").substringBefore('?').trim('/').replace('/', '-')
 
-    private data class HttpResult(val code: Int, val finalUrl: String, val contentType: String, val bytes: ByteArray) {
+    private data class HttpResult(val code: Int, val finalUrl: String, val contentType: String, val location: String, val bytes: ByteArray) {
         fun bytesAsText(): String = bytes.toString(Charsets.UTF_8)
     }
     private class InMemoryCookieJar : CookieJar {
         private val values = mutableListOf<Cookie>()
-        override fun loadForRequest(url: HttpUrl): List<Cookie> = synchronized(values) { values.filter { it.matches(url) } }
+        override fun loadForRequest(url: HttpUrl): List<Cookie> = synchronized(values) {
+            values.filter { it.matches(url) }
+        }
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = synchronized(values) {
             cookies.forEach { cookie ->
                 values.removeAll { it.name == cookie.name && it.domain == cookie.domain && it.path == cookie.path }
                 if (!cookie.expiresAt.let { it < System.currentTimeMillis() }) values.add(cookie)
             }
         }
+        fun hasCookie(name: String, host: String): Boolean = synchronized(values) {
+            val url = HttpUrl.Builder().scheme("https").host(host).build()
+            values.any { it.name == name && it.matches(url) }
+        }
     }
 
     companion object {
         private const val LOG_TAG = "LibreCapNetwork"
+        private const val REQUEST_INTERVAL_MS = 180L
         private val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+        private val requestPacingLock = Any()
+        private var nextRequestAt = 0L
     }
 }
 
