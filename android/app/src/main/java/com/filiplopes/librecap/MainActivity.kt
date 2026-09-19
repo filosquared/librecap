@@ -1209,7 +1209,7 @@ private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Rou
             item { MoreRow(Icons.Default.Assignment, lang.text("Homework", "Prace domowe"), lang.text("Assignments and tests", "Zadania i sprawdziany")) { open(Route.HOMEWORK) } }
             item { MoreRow(Icons.Default.EventAvailable, lang.text("Attendance", "Frekwencja"), lang.text("Presence and absences", "Obecności i nieobecności")) { open(Route.ATTENDANCE) } }
             item { MoreRow(Icons.Default.Settings, lang.text("Settings", "Ustawienia"), lang.text("Language, appearance, and sync", "Język, wygląd i synchronizacja")) { open(Route.SETTINGS) } }
-            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.0") {} }
+            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.2.0") {} }
         }
     }
 }
