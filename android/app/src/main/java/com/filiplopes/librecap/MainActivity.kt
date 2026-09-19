@@ -434,7 +434,7 @@ private fun RouteContent(
             go(Route.MESSAGES, "")
             viewModel.sync()
         }
-        Route.MORE -> MoreScreen(ui) { go(it, "") }
+        Route.MORE -> MoreScreen(ui, viewModel) { go(it, "") }
         Route.HOMEWORK -> HomeworkScreen(ui, viewModel) { go(Route.HOMEWORK_DETAIL, it) }
         Route.ATTENDANCE -> AttendanceScreen(ui, viewModel)
         Route.SETTINGS -> SettingsScreen(ui, viewModel) { go(Route.HOME, "") }
@@ -447,11 +447,29 @@ private fun RouteContent(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ScreenTopBar(title: String, back: Boolean = false, onBack: (() -> Unit)? = null, actions: @Composable (() -> Unit)? = null) {
+private fun ScreenTopBar(
+    title: String,
+    back: Boolean = false,
+    onBack: (() -> Unit)? = null,
+    onRefresh: (() -> Unit)? = null,
+    refreshing: Boolean = false,
+    actions: @Composable (() -> Unit)? = null
+) {
     TopAppBar(
         title = { Text(title) },
         navigationIcon = { if (back) IconButton(onClick = { onBack?.invoke() }) { Icon(Icons.Default.ArrowBack, "Back") } },
-        actions = { actions?.invoke() },
+        actions = {
+            actions?.invoke()
+            onRefresh?.let { refresh ->
+                IconButton(onClick = refresh, enabled = !refreshing) {
+                    if (refreshing) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.Refresh, "Refresh")
+                    }
+                }
+            }
+        },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
     )
 }
@@ -469,15 +487,11 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
     val lang = ui.language
     val uriHandler = LocalUriHandler.current
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(ui.data.profile?.fullName ?: "LibreCap", actions = {
-            IconButton(onClick = viewModel::sync, enabled = !ui.syncing) {
-                if (ui.syncing) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.Default.Refresh, lang.text("Sync now", "Synchronizuj"))
-                }
-            }
-        })
+        ScreenTopBar(
+            ui.data.profile?.fullName ?: "LibreCap",
+            onRefresh = viewModel::sync,
+            refreshing = ui.syncing
+        )
         LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -609,7 +623,7 @@ private fun GradesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (S
     val filtered = remember(ui.data.grades, semester) { ui.data.grades.filter { it.belongsTo(semester) } }
     val gradesBySubject = remember(filtered) { filtered.groupBy { it.subject }.toSortedMap() }
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(lang.text("Grades", "Oceny"))
+        ScreenTopBar(lang.text("Grades", "Oceny"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         ScrollableTabRow(selectedTabIndex = semester.ordinal, edgePadding = 16.dp) {
             listOf(lang.text("First semester", "Pierwsze półrocze"), lang.text("Second semester", "Drugie półrocze"), lang.text("All", "Wszystkie")).forEachIndexed { index, label ->
                 Tab(selected = semester.ordinal == index, onClick = { semester = GradeSemester.entries[index] }, text = { Text(label) })
@@ -697,7 +711,7 @@ private fun ScheduleScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: 
     }
 
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(lang.text("Schedule", "Plan lekcji"))
+        ScreenTopBar(lang.text("Schedule", "Plan lekcji"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         LazyColumn(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -894,7 +908,7 @@ private fun HomeworkScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: 
     val lang = ui.language
     val records = ui.data.homeworks.filter { !assessmentsOnly || it.isAssessment }
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(lang.text("Homework", "Prace domowe"))
+        ScreenTopBar(lang.text("Homework", "Prace domowe"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = !assessmentsOnly, onClick = { assessmentsOnly = false }, label = { Text(lang.text("All", "Wszystkie")) })
             FilterChip(selected = assessmentsOnly, onClick = { assessmentsOnly = true }, label = { Text(lang.text("Tests & classwork", "Kartkówki i klasówki")) })
@@ -941,7 +955,7 @@ private fun MessagesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: 
     val records = ui.data.messages.filter { it.folder == folder && !it.isLikelyHeaderRow }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            ScreenTopBar(lang.text("Messages", "Wiadomości"))
+            ScreenTopBar(lang.text("Messages", "Wiadomości"), onRefresh = viewModel::sync, refreshing = ui.syncing)
             ScrollableTabRow(selectedTabIndex = folder.ordinal, edgePadding = 12.dp) { labels.forEachIndexed { index, label -> Tab(selected = folder.ordinal == index, onClick = { folder = MessageFolder.entries[index] }, text = { Text(label) }) } }
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (records.isEmpty()) item { EmptyState(labels[folder.ordinal], lang.text("No messages in this folder.", "Brak wiadomości w tej kategorii."), Icons.Default.Email) }
@@ -1114,7 +1128,7 @@ private fun MessageDetailScreen(summary: MessageSummary, ui: SchoolUiState, view
 @Composable
 private fun AttendanceScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(ui.language.text("Attendance", "Frekwencja"))
+        ScreenTopBar(ui.language.text("Attendance", "Frekwencja"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (ui.data.attendances.isEmpty()) item { EmptyState(ui.language.text("No attendance", "Brak frekwencji"), ui.language.text("No data available.", "Brak danych."), Icons.Default.EventAvailable) }
             items(ui.data.attendances, key = { it.id }) { attendance -> Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(attendance.subject, fontWeight = FontWeight.SemiBold); Text("${attendance.date} · ${attendance.teacher}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; Text(attendance.shortType, color = if (attendance.isPresence) Color(0xFF2E8B57) else MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold) } } }
@@ -1123,11 +1137,11 @@ private fun AttendanceScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
 }
 
 @Composable
-private fun MoreScreen(ui: SchoolUiState, open: (Route) -> Unit) {
+private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Route) -> Unit) {
     val lang = ui.language
     val luckyDate = LocalDate.now().format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))
     Column(Modifier.fillMaxSize()) {
-        ScreenTopBar(lang.text("More", "Więcej"))
+        ScreenTopBar(lang.text("More", "Więcej"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item { StudentInfoCard(ui) }
             item {
