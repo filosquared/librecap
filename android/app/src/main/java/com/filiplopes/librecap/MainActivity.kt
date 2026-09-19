@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.AssignmentLate
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Checklist
@@ -1101,7 +1102,7 @@ private fun NewMessageScreen(ui: SchoolUiState, viewModel: SchoolViewModel, onBa
 @Composable
 private fun MessageDetailScreen(summary: MessageSummary, ui: SchoolUiState, viewModel: SchoolViewModel, onBack: () -> Unit) {
     LaunchedEffect(summary.id) {
-        if (summary.folder == MessageFolder.INBOX || summary.folder == MessageFolder.SENT) viewModel.loadMessage(summary.id)
+        if (summary.folder == MessageFolder.INBOX || summary.folder == MessageFolder.SENT) viewModel.loadMessage(summary.id, summary.folder)
     }
     val detail = viewModel.currentMessage.value
     Column(Modifier.fillMaxSize()) {
@@ -1120,6 +1121,33 @@ private fun MessageDetailScreen(summary: MessageSummary, ui: SchoolUiState, view
                 } else {
                     Text(detail.content.ifBlank { ui.language.text("No message content.", "Brak treści wiadomości.") })
                 }
+            }
+            if (detail != null && detail.attachments.isNotEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        detail.attachments.forEachIndexed { index, attachment ->
+                            OutlinedButton(
+                                onClick = { viewModel.openMessageInBrowser(summary.id) },
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Icon(Icons.Default.AttachFile, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = ui.language.text("Attachment ${index + 1}: ${attachment.name}", "Załącznik ${index + 1}: ${attachment.name}"),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(ui.language.text("Open", "Otwórz"), fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+            if (ui.attachmentError != null) {
+                item { Text(ui.attachmentError, color = MaterialTheme.colorScheme.error) }
             }
         }
     }

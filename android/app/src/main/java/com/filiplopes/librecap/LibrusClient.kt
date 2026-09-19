@@ -1,6 +1,8 @@
 package com.filiplopes.librecap
 
+import android.util.Base64
 import android.util.Log
+import android.webkit.MimeTypeMap
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -45,6 +47,7 @@ class LibrusClientError(val kind: LibrusErrorKind, message: String) : Exception(
 class LibrusClient {
     private val apiBase = "https://synergia.librus.pl/gateway/api/2.0/"
     private val portalBase = "https://synergia.librus.pl"
+    private val messagesApiBase = "https://wiadomosci.librus.pl/api/"
     private val oauthHost = "api.librus.pl"
     private val oauthAuthorizationUrl = "https://api.librus.pl/OAuth/Authorization?client_id=46"
     private val oauthAuthorizationGrantUrl = "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46"
@@ -59,6 +62,22 @@ class LibrusClient {
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+    private val messagesBootstrapHttp = http.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+    private val attachmentNoCookiesHttp = http.newBuilder()
+        .cookieJar(CookieJar.NO_COOKIES)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+    private val attachmentHeaders = mapOf(
+        "Accept" to "*/*",
+        "Origin" to "https://api.librus.pl",
+        "Referer" to oauthAuthorizationUrl,
+        "X-Requested-With" to "XMLHttpRequest"
+    )
+    private var messagesApiInitialized = false
     private val oauthHttp = http.newBuilder()
         .followRedirects(false)
         .followSslRedirects(false)
@@ -618,12 +637,370 @@ class LibrusClient {
         return announcements
     }
 
-    fun fetchMessage(id: String): MessageDetail {
+    fun fetchMessage(id: String, folder: MessageFolder = MessageFolder.INBOX): MessageDetail {
+        if (folder == MessageFolder.INBOX || folder == MessageFolder.SENT) {
+            runCatching {
+                initializeMessagesApi()
+                val box = if (folder == MessageFolder.SENT) "outbox" else "inbox"
+                val responses = messageApiResponses(box, id)
+                val response = responses.firstOrNull { it.code in 200..299 } ?: responses.last()
+                if (isLoginRedirect(response)) throw LibrusClientError(LibrusErrorKind.SESSION_EXPIRED, "Your Librus session expired. LibreCap will try to sign in again.")
+                if (response.code !in 200..299) throw responseError(response, "loading message")
+                val raw = parseObject(response.bytes, "message")
+                val data = raw.obj("data").takeIf { it.size() > 0 } ?: raw
+                val remoteMessageId = data.firstString("messageId", "MessageId", "id", "Id").ifBlank { apiMessageId(id) }
+                val content = decodeMessageContent(data.firstString("Message", "message", "Content", "content"))
+                val attachments = data.firstArray("attachments", "Attachments").mapNotNull { attachment ->
+                    val attachmentId = attachment.firstString("id", "Id").trim()
+                    val name = attachment.firstString("name", "Name", "filename", "FileName").trim()
+                    if (attachmentId.isBlank() || name.isBlank()) null else messageAttachment(
+                        id = attachmentId,
+                        name = name,
+                        size = attachment.firstString("size", "Size").toLongOrNull(),
+                        mimeType = mimeTypeFor(name),
+                        messageId = remoteMessageId
+                    )
+                }
+                MessageDetail(
+                    subject = data.firstString("topic", "Topic", "subject", "Subject").ifBlank { "Message" },
+                    sender = data.firstString("senderName", "SenderName", "sender", "Sender"),
+                    date = data.firstString("sendDate", "SendDate", "date", "Date"),
+                    content = content,
+                    attachments = attachments
+                )
+            }.onSuccess { detail ->
+                Log.d(LOG_TAG, "Message loaded from API: attachments=${detail.attachments.size}")
+            }.getOrNull()?.let { return it }
+        }
+
         val html = portalHtml("/wiadomosci/${id.replace('-', '/')}")
         val doc = Jsoup.parse(html)
         val content = doc.selectFirst(".container-message-content")?.text()?.trim().orEmpty()
         val subject = doc.selectFirst("table.stretch td")?.text()?.trim().orEmpty()
-        return MessageDetail(subject.ifEmpty { "Message" }, content = content)
+        return MessageDetail(
+            subject.ifEmpty { "Message" },
+            content = content,
+            attachments = parsePortalMessageAttachments(doc)
+        )
+    }
+
+    fun fetchMessageAttachment(messageId: String, folder: MessageFolder, attachment: MessageAttachment): ByteArray {
+        if (folder != MessageFolder.INBOX && folder != MessageFolder.SENT) {
+            throw LibrusClientError(LibrusErrorKind.MALFORMED_DATA, "This message does not have downloadable attachments.")
+        }
+        runCatching {
+            initializeMessagesApi()
+            val responses = messageApiAttachmentResponses(attachment.messageId.ifBlank { messageId }, attachment)
+            val response = responses.firstOrNull { it.code in 200..299 } ?: responses.last()
+            if (isLoginRedirect(response)) throw LibrusClientError(LibrusErrorKind.SESSION_EXPIRED, "Your Librus session expired. LibreCap will try to sign in again.")
+            if (response.code !in 200..299) throw responseError(response, "downloading attachment")
+            return resolveAttachmentDownload(response)
+        }.getOrElse { apiError ->
+            runCatching { fetchPortalMessageAttachment(messageId, attachment) }
+                .getOrNull()
+                ?.let { return it }
+            if (attachment.url.isBlank()) throw apiError
+            val response = request(attachment.url, headers = mapOf("Accept" to "*/*"))
+            if (response.code !in 200..299 || response.bytes.isEmpty()) throw responseError(response, "downloading attachment")
+            return response.bytes
+        }
+    }
+
+    private fun fetchPortalMessageAttachment(messageId: String, attachment: MessageAttachment): ByteArray {
+        val html = portalHtml("/wiadomosci/${messageId.replace('-', '/')}")
+        val document = Jsoup.parse(html)
+        val niceSources = portalAttachmentNiceValues(document, attachment)
+            .map { "$portalBase/wiadomosci/pobierz_zalacznik/$it" }
+        val exactSources = document.select("[onclick]").asSequence()
+            .mapNotNull { element -> extractPortalAttachmentSource(element.attr("onclick")) }
+            .distinct()
+            .toList()
+        val genericSources = (document.select("[onclick]").asSequence().map { it.attr("onclick") } +
+            document.select("a[href]").asSequence().map { it.attr("href") })
+            .mapNotNull { extractPortalAttachmentUrl(it) }
+            .toList()
+        val sources = (exactSources + niceSources + genericSources).toMutableList()
+        sources += "$portalBase/wiadomosci/pobierz_zalacznik/${encode(attachment.id)}"
+        var lastError: Throwable? = null
+        for (source in sources.distinct()) {
+            runCatching { resolvePortalAttachmentDownload(source) }
+                .onSuccess { return it }
+                .onFailure { lastError = it }
+        }
+        throw lastError ?: LibrusClientError(LibrusErrorKind.UNEXPECTED_RESPONSE, "Librus did not return a download link for this attachment.")
+    }
+
+    private fun extractPortalAttachmentSource(value: String): String? {
+        val normalized = value
+            .replace("\\\"", "\"")
+            .replace("\\'", "'")
+            .replace("\\", "")
+            .replace("&quot;", "\"", ignoreCase = true)
+            .replace("&#39;", "'")
+        val path = Regex("(?i)/[^\"'\\s,)]+pobierz[^\"'\\s,)]+")
+            .find(normalized)
+            ?.value
+        if (!path.isNullOrBlank()) {
+            val base = if (path.contains("GetFile/", ignoreCase = true)) "https://sandbox.librus.pl" else portalBase
+            return base + path
+        }
+        val argument = Regex("(?i)otworz\\((?:\"|')([^\"']+)(?:\"|')")
+            .find(normalized)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?: return null
+        if (!argument.contains("pobierz", ignoreCase = true) && !argument.contains("GetFile", ignoreCase = true)) return null
+        if (argument.startsWith("http", ignoreCase = true)) return argument
+        if (!argument.startsWith('/')) return null
+        val base = if (argument.contains("GetFile/", ignoreCase = true)) "https://sandbox.librus.pl" else portalBase
+        return base + argument
+    }
+
+    private fun portalAttachmentNiceValues(document: org.jsoup.nodes.Document, attachment: MessageAttachment): List<String> {
+        val rows = document.select("tr").asSequence()
+        val matchingRows = rows.filter { row ->
+            attachment.name.isNotBlank() && row.text().contains(attachment.name, ignoreCase = true)
+        }.toList()
+        val candidateRows = (matchingRows.asSequence() + document.select("tr").asSequence()).distinct()
+        val rowValues = candidateRows
+            .flatMap { row -> row.select("img[onclick], [onclick]").asSequence() }
+            .mapNotNull { element -> extractPortalAttachmentNice(element.attr("onclick")) }
+            .distinct()
+            .toList()
+        val allValues = document.select("[onclick]").asSequence()
+            .mapNotNull { element -> extractPortalAttachmentNice(element.attr("onclick")) }
+            .toList()
+        return (rowValues + allValues).distinct()
+    }
+
+    private fun extractPortalAttachmentNice(value: String): String? {
+        val normalized = value
+            .replace("\\\"", "\"")
+            .replace("\\'", "'")
+            .replace("\\", "")
+            .replace("&quot;", "\"", ignoreCase = true)
+            .replace("&#39;", "'")
+            .replace(" ", "")
+            .replace("\n", "")
+        val callArgument = Regex("(?i)otworz\\((?:\"|')([^\"']+)(?:\"|')")
+            .find(normalized)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
+        val candidate = callArgument.ifBlank { normalized }
+        val pathToken = Regex("(?i)/pobierz_zalacznik/([^\"'\\s,)]+)")
+            .find(candidate)
+            ?.groupValues
+            ?.getOrNull(1)
+        if (!pathToken.isNullOrBlank()) return pathToken
+        val marker = Regex("(?i)pobierz[^\\\"'\\s/(:=]*").find(candidate) ?: return null
+        val afterMarker = candidate.substring(marker.range.last + 1)
+        val token = when {
+            afterMarker.startsWith("/") -> afterMarker.drop(1)
+            else -> Regex("^[(/:=]+[\"']?([^\"'(),/]+)").find(afterMarker)?.groupValues?.getOrNull(1).orEmpty()
+        }
+        return token.takeWhile { it != '"' && it != '\'' && it != ')' && it != ',' }
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun extractPortalAttachmentUrl(onClick: String): String? {
+        val normalized = onClick
+            .replace("\\\"", "\"")
+            .replace("\\'", "'")
+            .replace("&quot;", "\"", ignoreCase = true)
+            .replace("&#39;", "'")
+        val path = Regex("(?i)(?:https?://[^\\\"'\\s]+|/[^\\\"'\\s]+)(?:pobierz_zalacznik|GetFile)[^\\\"'\\s]*")
+            .find(normalized)?.value ?: return null
+        if (path.startsWith("http", ignoreCase = true)) return path
+        val base = if (path.contains("GetFile/", ignoreCase = true)) "https://sandbox.librus.pl" else portalBase
+        return base + if (path.startsWith('/')) path else "/$path"
+    }
+
+    private fun resolveSignedAttachmentRedirect(url: String): ByteArray? {
+        val response = request(url, client = messagesBootstrapHttp, headers = attachmentHeaders)
+        if (response.code !in 300..399) return null
+        val location = response.location.trim()
+        val target = runCatching { URI(response.finalUrl).resolve(location) }.getOrNull() ?: return null
+        if (target.scheme != "https" || target.host != "sandbox.librus.pl" || !target.path.startsWith("/GetFile/", ignoreCase = true) || target.userInfo != null || target.port !in listOf(-1, 443)) return null
+        val file = request(target.toString(), headers = attachmentHeaders, client = attachmentNoCookiesHttp)
+        if (file.code !in 200..299 || file.bytes.isEmpty() || looksLikeHtml(file)) return null
+        return file.bytes
+    }
+
+    private fun resolvePortalAttachmentDownload(source: String): ByteArray {
+        resolveSignedAttachmentRedirect(source)?.let { return it }
+        val redirect = request(source, headers = mapOf("Accept" to "*/*"))
+        if (redirect.code !in 200..299) throw responseError(redirect, "opening attachment")
+        if (redirect.bytes.isNotEmpty() && !looksLikeHtml(redirect)) return redirect.bytes
+        var lastResponse = redirect
+        val downloadUrls = attachmentHtmlUrls(redirect.bytes) + attachmentDownloadUrls(source, redirect.finalUrl)
+        for (downloadUrl in downloadUrls.distinct()) {
+            val file = runCatching { request(downloadUrl, headers = mapOf("Accept" to "*/*")) }.getOrNull() ?: continue
+            lastResponse = file
+            if (file.code in 200..299 && file.bytes.isNotEmpty() && !looksLikeHtml(file)) return file.bytes
+        }
+        throw responseError(lastResponse, "downloading attachment")
+    }
+
+    private fun initializeMessagesApi() {
+        if (messagesApiInitialized) return
+        var response = request(
+            "$portalBase/wiadomosci3",
+            headers = mapOf("Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            client = messagesBootstrapHttp
+        )
+        var redirects = 0
+        while (response.code in 300..399 && redirects < 4) {
+            val target = messagesBootstrapRedirect(response.location, response.finalUrl)
+                ?: throw LibrusClientError(LibrusErrorKind.UNEXPECTED_RESPONSE, "Librus returned an unsafe messages redirect.")
+            response = request(
+                target,
+                headers = mapOf("Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                client = messagesBootstrapHttp
+            )
+            redirects += 1
+        }
+        if (isLoginRedirect(response)) throw LibrusClientError(LibrusErrorKind.SESSION_EXPIRED, "Your Librus session expired. LibreCap will try to sign in again.")
+        if (response.code !in 200..299) throw responseError(response, "opening messages")
+        messagesApiInitialized = true
+    }
+
+    private fun messagesBootstrapRedirect(value: String, base: String): String? {
+        val url = runCatching { URI(base).resolve(value) }.getOrNull() ?: return null
+        val allowedHost = url.host == URI(portalBase).host || url.host == URI(messagesApiBase).host
+        if (!allowedHost || url.userInfo != null || url.port !in listOf(-1, 443, 80)) return null
+        val scheme = if (url.host == URI(messagesApiBase).host) "https" else url.scheme
+        if (scheme != "https") return null
+        return URI(scheme, url.userInfo, url.host, 443, url.path, url.query, url.fragment).toString()
+    }
+
+    private fun apiMessageId(id: String): String = id.substringAfterLast('-').ifBlank { id }
+
+    private fun apiMessageIdCandidates(id: String): List<String> {
+        val parts = id.split('-').filter(String::isNotBlank)
+        val numericParts = parts.filter { part -> part.length >= 3 && part.all(Char::isDigit) }.reversed()
+        return listOf(apiMessageId(id)) + numericParts + listOf(id, id.filter(Char::isDigit))
+            .filter(String::isNotBlank)
+            .distinct()
+    }
+
+    private fun messageApiResponses(box: String, id: String): List<HttpResult> = apiMessageIdCandidates(id).map { candidate ->
+        request(
+            "$messagesApiBase$box/messages/${encode(candidate)}",
+            headers = mapOf("Accept" to "application/json")
+        )
+    }
+
+    private fun messageApiAttachmentResponses(messageId: String, attachment: MessageAttachment): List<HttpResult> =
+        apiMessageIdCandidates(messageId).map { candidate ->
+            request(
+                "${messagesApiBase}attachments/${encode(attachment.id)}/messages/${encode(candidate)}",
+                headers = mapOf(
+                    "Accept" to "*/*",
+                    "Origin" to "https://api.librus.pl",
+                    "Referer" to oauthAuthorizationUrl,
+                    "X-Requested-With" to "XMLHttpRequest"
+                )
+            )
+        }
+
+    private fun resolveAttachmentDownload(response: HttpResult): ByteArray {
+        if (!response.contentType.contains("json", ignoreCase = true)) {
+            if (response.bytes.isEmpty()) throw responseError(response, "downloading attachment")
+            return response.bytes
+        }
+        val raw = parseObject(response.bytes, "attachment")
+        val data = raw.obj("data").takeIf { it.size() > 0 } ?: raw
+        val link = data.firstString("downloadLink", "DownloadLink", "url", "Url").trim()
+        val url = runCatching { URI(link) }.getOrNull()
+        if (url?.scheme != "https" || url.host.isNullOrBlank()) {
+            throw LibrusClientError(LibrusErrorKind.UNEXPECTED_RESPONSE, "Librus returned an invalid attachment download link.")
+        }
+        resolveSignedAttachmentRedirect(link)?.let { return it }
+        val download = request(link, headers = attachmentHeaders)
+        if (download.code !in 200..299) throw responseError(download, "downloading attachment")
+        if (download.bytes.isNotEmpty() && !looksLikeHtml(download)) return download.bytes
+
+        val downloadUrls = attachmentHtmlUrls(download.bytes) + attachmentDownloadUrls(link, download.finalUrl)
+        var lastResponse = download
+        for (downloadUrl in downloadUrls) {
+            val file = runCatching { request(downloadUrl, headers = mapOf("Accept" to "*/*")) }.getOrNull() ?: continue
+            lastResponse = file
+            if (file.code in 200..299 && file.bytes.isNotEmpty() && !looksLikeHtml(file)) return file.bytes
+        }
+        throw responseError(lastResponse, "downloading attachment")
+    }
+
+    private fun attachmentDownloadUrls(link: String, finalUrl: String): List<String> {
+        return listOf(link, finalUrl).flatMap { value ->
+            runCatching {
+                val base = URI(value)
+                val path = base.path.trimEnd('/')
+                listOf(
+                    URI(base.scheme, base.userInfo, base.host, base.port, "$path/get", base.query, base.fragment).toString(),
+                    URI(base.scheme, base.userInfo, base.host, base.port, "/get", base.query, base.fragment).toString()
+                )
+            }.getOrElse { emptyList() }
+        }.filter { it.startsWith("https://") }.distinct()
+    }
+
+    private fun attachmentHtmlUrls(bytes: ByteArray): List<String> {
+        if (bytes.isEmpty()) return emptyList()
+        val html = bytes.toString(Charsets.UTF_8)
+        val document = Jsoup.parse(html)
+        val values = document.select("a[href], [onclick]").flatMap { element ->
+            listOf(element.attr("href"), element.attr("onclick"))
+        } + html
+        return values.mapNotNull { extractPortalAttachmentUrl(it) }.distinct()
+    }
+
+    private fun looksLikeHtml(response: HttpResult): Boolean {
+        val prefix = response.bytesAsText().trimStart().take(128).lowercase(Locale.ROOT)
+        if (prefix.startsWith("%pdf-")) return false
+        return response.contentType.contains("text/html", ignoreCase = true) ||
+            prefix.startsWith("<!doctype html") || prefix.startsWith("<html")
+    }
+
+    private fun decodeMessageContent(value: String): String {
+        if (value.isBlank()) return ""
+        val candidate = value.trim()
+        if (candidate.length % 4 == 0 && candidate.matches(Regex("[A-Za-z0-9+/=\\r\\n]+"))) {
+            runCatching { Base64.decode(candidate, Base64.DEFAULT).toString(Charsets.UTF_8) }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return Jsoup.parse(it).text().trim() }
+        }
+        return Jsoup.parse(candidate).text().trim()
+    }
+
+    private fun messageAttachment(id: String, name: String, size: Long?, mimeType: String, url: String = "", messageId: String = "") =
+        MessageAttachment(id = id, name = name, size = size, url = url, mimeType = mimeType, messageId = messageId)
+
+    private fun mimeTypeFor(name: String): String {
+        val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "application/octet-stream"
+    }
+
+    private fun parsePortalMessageAttachments(document: org.jsoup.nodes.Document): List<MessageAttachment> {
+        return document.select("a[href]").mapNotNull { link ->
+            val href = link.attr("href").trim()
+            val label = link.text().trim().ifBlank { link.attr("title").trim() }
+            val lower = "$href $label".lowercase(Locale.ROOT)
+            val looksLikeAttachment = listOf("załącz", "zalacz", "attachment", "plik", "file").any(lower::contains) ||
+                Regex("\\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|zip|rar)(?:[?#]|$)", RegexOption.IGNORE_CASE).containsMatchIn(href)
+            val path = portalPath(href)
+            if (!looksLikeAttachment || path == null) null else {
+                val name = label.ifBlank { path.substringAfterLast('/').substringBefore('?') }.ifBlank { "attachment" }
+                messageAttachment(
+                    id = path.hashCode().toString(),
+                    name = name,
+                    size = null,
+                    url = portalBase + path,
+                    mimeType = mimeTypeFor(name)
+                )
+            }
+        }.distinctBy { it.url.ifBlank { it.id } }
     }
 
     private data class SubstitutionDetails(
@@ -915,6 +1292,7 @@ class LibrusClient {
 
 private fun JsonObject.obj(key: String): JsonObject = get(key)?.takeIf { it.isJsonObject }?.asJsonObject ?: JsonObject()
 private fun JsonObject.array(key: String): List<JsonObject> = get(key)?.takeIf { it.isJsonArray }?.asJsonArray?.mapNotNull { it.takeIf(JsonElement::isJsonObject)?.asJsonObject } ?: emptyList()
+private fun JsonObject.firstArray(vararg keys: String): List<JsonObject> = keys.asSequence().map(::array).firstOrNull { it.isNotEmpty() } ?: emptyList()
 private fun JsonObject.string(key: String, fallback: String = ""): String = get(key)?.let { value ->
     when {
         value.isJsonNull -> fallback

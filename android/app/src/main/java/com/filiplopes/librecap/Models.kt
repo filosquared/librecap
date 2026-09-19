@@ -202,7 +202,17 @@ data class MessageDetail(
     val subject: String,
     val sender: String = "",
     val date: String = "",
-    val content: String
+    val content: String,
+    val attachments: List<MessageAttachment> = emptyList()
+)
+
+data class MessageAttachment(
+    val id: String,
+    val name: String,
+    val size: Long? = null,
+    val url: String = "",
+    val mimeType: String = "application/octet-stream",
+    val messageId: String = ""
 )
 
 data class SchoolNote(

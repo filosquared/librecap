@@ -1,6 +1,9 @@
 package com.filiplopes.librecap
 
 import android.app.Application
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -37,6 +40,8 @@ data class SchoolUiState(
     val loadingMessageRecipients: Boolean = false,
     val loadingMessage: Boolean = false,
     val messageDetailError: String? = null,
+    val downloadingAttachmentId: String? = null,
+    val attachmentError: String? = null,
     val sendingMessage: Boolean = false,
     val messageActionError: String? = null,
     val messageActionSuccess: Boolean = false,
@@ -436,6 +441,8 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
                 error = null,
                 messageRecipients = emptyList(),
                 loadingMessageRecipients = false,
+                downloadingAttachmentId = null,
+                attachmentError = null,
                 sendingMessage = false,
                 messageActionError = null,
                 messageActionSuccess = false
@@ -451,7 +458,7 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun note(id: String): SchoolNote? = state.value.notes.firstOrNull { it.id == id }
-    fun loadMessage(id: String) {
+    fun loadMessage(id: String, folder: MessageFolder = MessageFolder.INBOX) {
         currentMessage.value = null
         val activeClient = client
         if (activeClient == null) {
@@ -463,10 +470,10 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
-        update { it.copy(loadingMessage = true, messageDetailError = null) }
+        update { it.copy(loadingMessage = true, messageDetailError = null, downloadingAttachmentId = null, attachmentError = null) }
         viewModelScope.launch {
             try {
-                currentMessage.value = withContext(Dispatchers.IO) { activeClient.fetchMessage(id) }
+                currentMessage.value = withContext(Dispatchers.IO) { activeClient.fetchMessage(id, folder) }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 update {
@@ -477,6 +484,21 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
             } finally {
                 update { it.copy(loadingMessage = false) }
             }
+        }
+    }
+
+    fun openMessageInBrowser(messageId: String) {
+        val path = messageId.split('-').filter(String::isNotBlank).joinToString("/")
+        val messageUrl = "https://synergia.librus.pl/wiadomosci/$path"
+        update { it.copy(attachmentError = null) }
+        try {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(messageUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (_: ActivityNotFoundException) {
+            update { it.copy(attachmentError = "Could not open Librus in a browser.") }
         }
     }
 
