@@ -7,15 +7,28 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
+data class ReleaseAsset(
+    val name: String,
+    @SerializedName("browser_download_url") val browserDownloadUrl: String
+)
+
 data class AppRelease(
     @SerializedName("tag_name") val tagName: String,
     val name: String?,
     @SerializedName("html_url") val htmlUrl: String,
+    val assets: List<ReleaseAsset> = emptyList(),
     val prerelease: Boolean = false,
     val draft: Boolean = false
 ) {
     val displayName: String
         get() = name?.trim()?.takeIf { it.isNotEmpty() } ?: tagName
+
+    val installUrl: String
+        get() = assets.firstOrNull { it.name.equals("LibreCap-Android-debug.apk", ignoreCase = true) }?.browserDownloadUrl
+            ?: assets.firstOrNull {
+                it.name.endsWith(".apk", ignoreCase = true) && !it.name.contains("unsigned", ignoreCase = true)
+            }?.browserDownloadUrl
+            ?: htmlUrl
 }
 
 class GitHubReleaseChecker(

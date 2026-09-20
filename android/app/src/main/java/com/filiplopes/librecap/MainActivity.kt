@@ -70,6 +70,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -541,6 +542,10 @@ private fun DetailScaffold(title: String, onBack: () -> Unit, content: @Composab
 private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: () -> Unit, attendance: () -> Unit, messages: () -> Unit, openLesson: (String) -> Unit) {
     val lang = ui.language
     val uriHandler = LocalUriHandler.current
+    var showUpdatePrompt by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(ui.availableUpdate?.tagName) {
+        if (ui.availableUpdate != null) showUpdatePrompt = true
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(
             ui.data.profile?.fullName ?: "LibreCap",
@@ -558,7 +563,7 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
                 }
             }
             ui.availableUpdate?.let { release ->
-                item { UpdateCard(release, lang) { uriHandler.openUri(release.htmlUrl) } }
+                item { UpdateCard(release, lang) { uriHandler.openUri(release.installUrl) } }
             }
             item { Text(lang.text("Quick actions", "Szybkie akcje"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
             item {
@@ -574,6 +579,19 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
                 }
             }
             item { TodayCard(ui, viewModel, openLesson) }
+        }
+    }
+    ui.availableUpdate?.let { release ->
+        if (showUpdatePrompt) {
+            UpdateDialog(
+                release = release,
+                language = lang,
+                onDismiss = { showUpdatePrompt = false },
+                onInstall = {
+                    showUpdatePrompt = false
+                    uriHandler.openUri(release.installUrl)
+                }
+            )
         }
     }
 }
@@ -621,17 +639,57 @@ private fun UpdateCard(release: AppRelease, language: AppLanguage, openRelease: 
             Text("${release.displayName} (${release.tagName})", style = MaterialTheme.typography.bodyMedium)
             Text(
                 language.text(
-                    "Open the GitHub release page to see what's new and download the update.",
-                    "Otwórz stronę wydania na GitHubie, aby zobaczyć zmiany i pobrać aktualizację."
+                    "Open the release page to install the update.",
+                    "Otwórz stronę wydania, aby zainstalować aktualizację."
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Button(onClick = openRelease) { Text(language.text("View release", "Zobacz wydanie")) }
+            Button(onClick = openRelease) { Text(language.text("Install", "Zainstaluj")) }
         }
     }
 }
 
+@Composable
+private fun UpdateDialog(
+    release: AppRelease?,
+    language: AppLanguage,
+    onDismiss: () -> Unit,
+    onInstall: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (release == null) language.text("No new update", "Brak nowej aktualizacji")
+                else language.text("New update available", "Dostępna nowa aktualizacja")
+            )
+        },
+        text = {
+            Text(
+                if (release == null) language.text(
+                    "You are using the latest version of LibreCap.",
+                    "Masz najnowszą wersję LibreCap."
+                ) else language.text(
+                    "${release.displayName} is ready to install.",
+                    "${release.displayName} jest gotowa do zainstalowania."
+                )
+            )
+        },
+        confirmButton = {
+            if (release == null) {
+                TextButton(onClick = onDismiss) { Text(language.text("OK", "OK")) }
+            } else {
+                Button(onClick = onInstall) { Text(language.text("Install", "Zainstaluj")) }
+            }
+        },
+        dismissButton = {
+            if (release != null) {
+                TextButton(onClick = onDismiss) { Text(language.text("Not now", "Nie teraz")) }
+            }
+        }
+    )
+}
 @Composable
 private fun TodayCard(ui: SchoolUiState, viewModel: SchoolViewModel, openLesson: (String) -> Unit) {
     val lang = ui.language
@@ -1287,6 +1345,15 @@ private fun AttendanceSummaryCard(title: String, count: Int, color: Color, modif
 @Composable
 private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Route) -> Unit, openMessageFolder: (MessageFolder) -> Unit) {
     val lang = ui.language
+    val uriHandler = LocalUriHandler.current
+    var aboutUpdateCheckRequested by rememberSaveable { mutableStateOf(false) }
+    var showAboutUpdateResult by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(aboutUpdateCheckRequested, ui.checkingForUpdates) {
+        if (aboutUpdateCheckRequested && !ui.checkingForUpdates) {
+            aboutUpdateCheckRequested = false
+            showAboutUpdateResult = true
+        }
+    }
     val luckyDate = LocalDate.now().format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("More", "Więcej"), onRefresh = viewModel::sync, refreshing = ui.syncing)
@@ -1331,8 +1398,19 @@ private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Rou
             item { MoreRow(Icons.Default.NoteAlt, lang.text("Notes", "Uwagi"), lang.text("Teacher notes", "Uwagi nauczycieli")) { openMessageFolder(MessageFolder.NOTES) } }
             item { MoreRow(Icons.Default.EventAvailable, lang.text("Attendance", "Frekwencja"), lang.text("Presence and absences", "Obecności i nieobecności")) { open(Route.ATTENDANCE) } }
             item { MoreRow(Icons.Default.Settings, lang.text("Settings", "Ustawienia"), lang.text("Language, appearance, and sync", "Język, wygląd i synchronizacja")) { open(Route.SETTINGS) } }
-            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.3.0") {} }
+            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.3.0") { aboutUpdateCheckRequested = true; viewModel.checkForUpdates() } }
         }
+    }
+    if (showAboutUpdateResult) {
+        UpdateDialog(
+            release = ui.availableUpdate,
+            language = lang,
+            onDismiss = { showAboutUpdateResult = false },
+            onInstall = {
+                showAboutUpdateResult = false
+                ui.availableUpdate?.let { uriHandler.openUri(it.installUrl) }
+            }
+        )
     }
 }
 
@@ -1382,6 +1460,15 @@ private fun MoreRow(icon: ImageVector, title: String, subtitle: String, onClick:
 @Composable
 private fun SettingsScreen(ui: SchoolUiState, viewModel: SchoolViewModel, close: () -> Unit) {
     val lang = ui.language
+    val uriHandler = LocalUriHandler.current
+    var aboutUpdateCheckRequested by rememberSaveable { mutableStateOf(false) }
+    var showAboutUpdateResult by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(aboutUpdateCheckRequested, ui.checkingForUpdates) {
+        if (aboutUpdateCheckRequested && !ui.checkingForUpdates) {
+            aboutUpdateCheckRequested = false
+            showAboutUpdateResult = true
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("Settings", "Ustawienia"), true, close)
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
