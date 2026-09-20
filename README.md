@@ -15,7 +15,7 @@ trusted reverse proxy.
 | --- | --- | --- |
 | Web app | Self-hosting on a Mac, NAS, or server | Yes |
 | Native macOS app | A single desktop app with the shared SwiftUI interface | No |
-| Native Windows app | A single desktop app using the existing LibreCap interface | No |
+| Windows desktop app | A single desktop app using the existing LibreCap interface | No |
 | Native iPhone app | Direct Librus access with local caching | No |
 | Apple Watch companion | Quick timetable, grades, homework, and lesson alerts | No; paired iPhone required |
 | Native Android app | Direct Librus access with local caching | No |

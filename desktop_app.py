@@ -18,6 +18,9 @@ import librusik
 from lib import utils
 from lib.desktop import build_app_url, initial_password_message
 
+# A desktop window must never turn a local installation into a network service.
+librusik.config["listen_address"] = "127.0.0.1"
+
 
 def app_url() -> str:
 	return build_app_url(librusik.config, port=librusik.ACTIVE_PORT)
@@ -76,23 +79,32 @@ def run_embedded() -> None:
 	)
 	thread.start()
 	if not ready.wait(timeout=15):
+		request = stop_holder.get("request")
+		if callable(request):
+			request()
 		raise RuntimeError("LibreCap server did not start within 15 seconds")
 	if startup_errors:
+		request = stop_holder.get("request")
+		if callable(request):
+			request()
+		thread.join(timeout=15)
 		raise startup_errors[0]
 
-	show_initial_password()
-	window = webview.create_window(
-		"LibreCap",
-		app_url(),
-		width=1200,
-		height=800,
-		min_size=(900, 600),
-	)
-	window.events.closed += lambda: stop_holder["request"]()
 	try:
+		show_initial_password()
+		window = webview.create_window(
+			"LibreCap",
+			app_url(),
+			width=1200,
+			height=800,
+			min_size=(900, 600),
+		)
+		window.events.closed += lambda: stop_holder["request"]()
 		webview.start(debug=False)
 	finally:
-		stop_holder["request"]()
+		request = stop_holder.get("request")
+		if callable(request):
+			request()
 		thread.join(timeout=15)
 
 
