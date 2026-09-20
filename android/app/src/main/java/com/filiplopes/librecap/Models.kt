@@ -1,6 +1,7 @@
 package com.filiplopes.librecap
 
 import java.time.Instant
+import java.util.Locale
 
 data class StudentProfile(
     val firstName: String = "Student",
@@ -67,10 +68,16 @@ data class TimetableLesson(
     val hourTo: String,
     val classroom: String,
     val originalSubject: String? = null,
-    val originalTeacher: String? = null
+    val originalTeacher: String? = null,
+    val date: String? = null
 ) {
     fun startMinutes(): Int? = hourFrom.toMinutes()
     fun endMinutes(): Int? = hourTo.toMinutes()
+
+    val effectiveDate: String
+        get() = date.orEmpty().trim().take(10).ifBlank {
+            Regex("\\d{4}-\\d{2}-\\d{2}").find(id)?.value.orEmpty()
+        }
 
     val displaySubject: String
         get() = originalSubject
@@ -116,10 +123,65 @@ data class HomeworkRecord(
     val endTime: String,
     val date: String,
     val addedDate: String,
-    val content: String
+    val content: String,
+    val lessonNumber: String? = null
 ) {
+    private val searchableText: String
+        get() = "$type $content".lowercase(Locale.ROOT)
+
     val isAssessment: Boolean
-        get() = type.lowercase().let { it.contains("sprawdz") || it.contains("kartk") || it.contains("class") || it.contains("test") }
+        get() = searchableText.let {
+            it.contains("sprawdz") || it.contains("kartk") || it.contains("class") ||
+                it.contains("klasow") || it.contains("test") || it.contains("egzamin")
+        }
+
+    val displayType: String
+        get() {
+            val cleanType = type.trim()
+            val genericType = cleanType.isBlank() || cleanType.lowercase(Locale.ROOT) in setOf(
+                "homework", "praca domowa", "zadanie domowe"
+            )
+            if (!genericType) return cleanType
+            return when {
+                searchableText.contains("popraw") && searchableText.contains("kartk") -> "Poprawa kartkówki"
+                searchableText.contains("praca klas") || searchableText.contains("klasow") -> "Praca klasowa"
+                searchableText.contains("kartk") -> "Kartkówka"
+                searchableText.contains("sprawdz") -> "Sprawdzian"
+                searchableText.contains("egzamin") -> "Egzamin"
+                searchableText.contains("test") -> "Test"
+                else -> cleanType
+            }
+        }
+
+    fun matchesLesson(lesson: TimetableLesson): Boolean {
+        val homeworkSubject = subject.trim().lowercase(Locale.ROOT)
+        if (homeworkSubject.isBlank()) return false
+        val lessonSubjects = listOf(lesson.subject, lesson.originalSubject.orEmpty())
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter(String::isNotBlank)
+        val subjectMatches = lessonSubjects.any {
+            it == homeworkSubject || it.contains(homeworkSubject) || homeworkSubject.contains(it)
+        }
+        if (!subjectMatches) return false
+
+        val homeworkLessonNumber = lessonNumber.orEmpty().trim()
+        val currentLessonNumber = lesson.lessonNumber.trim()
+        if (homeworkLessonNumber.isNotBlank() && currentLessonNumber.isNotBlank() &&
+            homeworkLessonNumber != currentLessonNumber
+        ) return false
+
+        val lessonDate = lesson.effectiveDate
+        val homeworkDate = date.trim().take(10)
+        if (lessonDate.isNotBlank() && homeworkDate.isNotBlank() && lessonDate != homeworkDate) return false
+
+        val lessonStart = lesson.startMinutes()
+        val lessonEnd = lesson.endMinutes()
+        val homeworkStart = startTime.toMinutes()
+        val homeworkEnd = endTime.toMinutes()
+        if (homeworkStart != null && lessonStart != null && homeworkStart != lessonStart) return false
+        if (homeworkEnd != null && lessonEnd != null && homeworkEnd != lessonEnd) return false
+        return true
+    }
 }
 
 data class MessageSummary(
@@ -140,7 +202,17 @@ data class MessageDetail(
     val subject: String,
     val sender: String = "",
     val date: String = "",
-    val content: String
+    val content: String,
+    val attachments: List<MessageAttachment> = emptyList()
+)
+
+data class MessageAttachment(
+    val id: String,
+    val name: String,
+    val size: Long? = null,
+    val url: String = "",
+    val mimeType: String = "application/octet-stream",
+    val messageId: String = ""
 )
 
 data class SchoolNote(
@@ -155,6 +227,7 @@ data class CachedSchoolData(
     val profile: StudentProfile? = null,
     val grades: List<GradeRecord> = emptyList(),
     val timetable: TimetableData? = null,
+    val timetableWeeks: Map<String, TimetableData> = emptyMap(),
     val attendances: List<AttendanceRecord> = emptyList(),
     val homeworks: List<HomeworkRecord> = emptyList(),
     val messages: List<MessageSummary> = emptyList(),
@@ -171,7 +244,7 @@ enum class GradeSemester { FIRST, SECOND, ALL }
 
 fun String.toMinutes(): Int? {
     val parts = trim().split(":")
-    if (parts.size != 2) return null
+    if (parts.size < 2) return null
     return parts[0].toIntOrNull()?.times(60)?.plus(parts[1].toIntOrNull() ?: return null)
 }
 

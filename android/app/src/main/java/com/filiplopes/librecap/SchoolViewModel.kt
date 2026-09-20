@@ -1,8 +1,13 @@
 package com.filiplopes.librecap
 
 import android.app.Application
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -10,10 +15,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.time.DayOfWeek
 import java.time.Instant
+import java.time.LocalDate
 
+@Immutable
 data class SchoolUiState(
     val ready: Boolean = false,
     val authenticated: Boolean = false,
@@ -29,9 +38,15 @@ data class SchoolUiState(
     val checkingForUpdates: Boolean = false,
     val messageRecipients: List<MessageRecipient> = emptyList(),
     val loadingMessageRecipients: Boolean = false,
+    val loadingMessage: Boolean = false,
+    val messageDetailError: String? = null,
+    val downloadingAttachmentId: String? = null,
+    val attachmentError: String? = null,
     val sendingMessage: Boolean = false,
     val messageActionError: String? = null,
-    val messageActionSuccess: Boolean = false
+    val messageActionSuccess: Boolean = false,
+    val scheduleLoading: Boolean = false,
+    val scheduleError: String? = null
 )
 
 class SchoolViewModel(application: Application) : AndroidViewModel(application) {
@@ -43,8 +58,18 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
     private val preferences = context.getSharedPreferences("settings", 0)
     private var client: LibrusClient? = null
     private var syncJob: Job? = null
+    private var startupLoadingJob: Job? = null
     private var automaticJob: Job? = null
+    private var timetableJob: Job? = null
+    private var scheduleReconnectAttemptedForWeek: String? = null
     private var generation = 0
+    private var startupLoadingActive = false
+
+    private companion object {
+        const val AUTH_TIMEOUT_MS = 60_000L
+        const val INITIAL_SYNC_TIMEOUT_MS = 90_000L
+        const val STARTUP_LOADING_MS = 3_200L
+    }
 
     var state = androidx.compose.runtime.mutableStateOf(loadInitial())
         private set
@@ -55,8 +80,14 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
         checkForUpdates()
         val saved = credentials.load()
         if (saved != null) {
-            state.value = state.value.copy(username = saved.username, ready = true, authenticated = state.value.data.profile != null, syncing = true)
+            state.value = state.value.copy(
+                username = saved.username,
+                ready = false,
+                authenticated = state.value.data.profile != null,
+                syncing = true
+            )
             val currentGeneration = generation
+            startStartupLoading(currentGeneration)
             syncJob = viewModelScope.launch { restore(saved, currentGeneration) }
         } else {
             state.value = state.value.copy(ready = true)
@@ -80,10 +111,12 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
         val currentGeneration = generation
         client = null
         syncJob?.cancel()
+        startupLoadingJob?.cancel()
+        startupLoadingActive = false
         update { it.copy(syncing = true, error = null) }
         syncJob = viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) { LibrusClient().also { newClient -> newClient.login(trimmed, password) } }
+                val result = authenticate(trimmed, password)
                 if (currentGeneration != generation) return@launch
                 if (!credentials.save(StoredCredentials(trimmed, password))) {
                     throw LibrusClientError(
@@ -92,10 +125,9 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
                 client = result
-                val profile = withContext(Dispatchers.IO) { result.fetchProfile() }
-                val fresh = CachedSchoolData(profile = profile)
-                update { it.copy(ready = true, authenticated = true, username = trimmed, data = fresh) }
-                syncInternal(currentGeneration)
+                val fresh = CachedSchoolData()
+                update { it.copy(ready = false, authenticated = true, syncing = true, username = trimmed, data = fresh) }
+                initialSync(currentGeneration)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 if (currentGeneration == generation) update { it.copy(ready = true, syncing = false, error = error.message ?: "Sign-in failed.") }
@@ -123,40 +155,120 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val saved = credentials.load() ?: return
-        update { it.copy(username = saved.username, syncing = true, error = null) }
+        update {
+            it.copy(
+                username = saved.username,
+                ready = it.data.profile != null,
+                syncing = true,
+                error = null
+            )
+        }
         syncJob?.cancel()
         syncJob = viewModelScope.launch { restore(saved, currentGeneration) }
     }
 
-    private suspend fun syncInternal(currentGeneration: Int, allowSessionRecovery: Boolean = true) {
+    private suspend fun initialSync(currentGeneration: Int, profile: StudentProfile? = null) {
+        val completed = withTimeoutOrNull(INITIAL_SYNC_TIMEOUT_MS) {
+            syncInternal(currentGeneration, initialProfile = profile)
+            true
+        } ?: false
+        if (!completed && currentGeneration == generation) {
+            startupLoadingJob?.cancel()
+            startupLoadingActive = false
+            update {
+                it.copy(
+                    ready = true,
+                    syncing = false,
+                    error = "Librus is taking too long. Showing saved data. Try again later."
+                )
+            }
+        }
+    }
+
+    private suspend fun authenticate(username: String, password: String): LibrusClient =
+        withTimeoutOrNull(AUTH_TIMEOUT_MS) {
+            withContext(Dispatchers.IO) {
+                LibrusClient().also { newClient -> newClient.establishSession(username, password) }
+            }
+        } ?: throw LibrusClientError(
+            LibrusErrorKind.UNAVAILABLE,
+            "Librus took too long to respond while signing in. Check your connection and try again."
+        )
+
+    private suspend fun syncInternal(
+        currentGeneration: Int,
+        allowSessionRecovery: Boolean = true,
+        initialProfile: StudentProfile? = null
+    ) {
         val activeClient = client ?: return
         update { it.copy(syncing = true, error = null) }
         var refreshed = state.value.data
         var firstError: Exception? = null
-        suspend fun <T> load(block: suspend () -> T, apply: (T) -> Unit) {
+        var sessionExpired = false
+        var refreshedSections = 0
+        suspend fun <T> request(block: suspend () -> T): Result<T> {
             try {
-                apply(withContext(Dispatchers.IO) { block() })
+                return Result.success(withContext(Dispatchers.IO) { block() })
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                if (firstError == null) firstError = error
+                return Result.failure(error)
             }
         }
-        load({ activeClient.fetchProfile() }) { refreshed = refreshed.copy(profile = it) }
-        load({ activeClient.fetchGrades() }) { refreshed = refreshed.copy(grades = it, gradesUpdatedAt = Instant.now().toString()) }
-        load({ activeClient.fetchTimetable() }) { refreshed = refreshed.copy(timetable = it, timetableUpdatedAt = Instant.now().toString()) }
-        load({ activeClient.fetchAttendances() }) { refreshed = refreshed.copy(attendances = it) }
-        load({ activeClient.fetchHomeworks() }) { refreshed = refreshed.copy(homeworks = it, homeworksUpdatedAt = Instant.now().toString()) }
-        load({ activeClient.fetchLuckyNumber() }) { refreshed = refreshed.copy(luckyNumber = it) }
-        load({ activeClient.fetchMessages() }) { refreshed = refreshed.copy(messages = it) }
+        fun <T> applyResult(
+            result: Result<T>,
+            countsAsRefresh: Boolean = true,
+            reportFailure: Boolean = true,
+            apply: (T) -> Unit
+        ) {
+            result.onSuccess { value ->
+                if (countsAsRefresh) refreshedSections += 1
+                apply(value)
+            }.onFailure { error ->
+                if (error.isSessionExpired()) sessionExpired = true
+                if (reportFailure && firstError == null) firstError = error as? Exception ?: Exception(error)
+            }
+        }
+        applyResult(
+            if (initialProfile != null) Result.success(initialProfile)
+            else request { activeClient.fetchProfile() },
+            countsAsRefresh = false
+        ) { refreshed = refreshed.copy(profile = it) }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchGrades() }) { refreshed = refreshed.copy(grades = it, gradesUpdatedAt = Instant.now().toString()) }
+        }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchTimetable() }) {
+                val weekKey = it.weekStart.orEmpty()
+                refreshed = refreshed.copy(
+                    timetable = it,
+                    timetableWeeks = if (weekKey.isBlank()) refreshed.timetableWeeks else refreshed.timetableWeeks + (weekKey to it),
+                    timetableUpdatedAt = Instant.now().toString()
+                )
+            }
+        }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchAttendances() }) { refreshed = refreshed.copy(attendances = it) }
+        }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchHomeworks() }) { refreshed = refreshed.copy(homeworks = it, homeworksUpdatedAt = Instant.now().toString()) }
+        }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchLuckyNumber() }, countsAsRefresh = false, reportFailure = false) { refreshed = refreshed.copy(luckyNumber = it) }
+        }
+        if (!sessionExpired) {
+            applyResult(request { activeClient.fetchMessages() }) { refreshed = refreshed.copy(messages = it) }
+        }
         if (currentGeneration != generation) return
 
-        if (firstError?.isSessionExpired() == true && allowSessionRecovery) {
+        if (sessionExpired && allowSessionRecovery) {
             val saved = credentials.load()
             if (saved != null) {
                 try {
-                    val restored = withContext(Dispatchers.IO) { LibrusClient().also { it.login(saved.username, saved.password) } }
+                    val restored = authenticate(saved.username, saved.password)
                     if (currentGeneration != generation) return
                     client = restored
+                    update { it.copy(authenticated = true) }
                     syncInternal(currentGeneration, allowSessionRecovery = false)
                     return
                 } catch (error: Exception) {
@@ -170,12 +282,18 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
 
         refreshed = refreshed.copy(lastSync = Instant.now().toString())
         val savedLocally = localStore.save(refreshed)
-        val displayError = firstError?.let { friendlyError(it, "Some school data could not be refreshed. Try again.") }
+        val displayError = firstError?.takeIf { refreshedSections == 0 || it.isSessionExpired() }?.let {
+            friendlyError(
+                it,
+                "Some school data could not be refreshed. Try again.",
+                hasCachedData = refreshed.profile != null || refreshed.grades.isNotEmpty() || refreshed.timetable != null
+            )
+        }
         update {
             it.copy(
                 data = refreshed,
                 authenticated = it.authenticated && !firstError.isInvalidCredentials(),
-                ready = true,
+                ready = if (startupLoadingActive) it.ready else true,
                 syncing = false,
                 error = displayError ?: if (!savedLocally) "School data was refreshed, but LibreCap could not save it locally. Check device storage." else null
             )
@@ -184,13 +302,21 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun restore(saved: StoredCredentials, currentGeneration: Int) {
         try {
-            val restored = withContext(Dispatchers.IO) { LibrusClient().also { it.login(saved.username, saved.password) } }
+            val restored = authenticate(saved.username, saved.password)
             if (currentGeneration != generation) return
             client = restored
-            update { it.copy(authenticated = true, ready = true, syncing = false) }
-            syncInternal(currentGeneration)
+            update {
+                it.copy(
+                    authenticated = true,
+                    ready = if (startupLoadingActive) it.ready else it.data.profile != null,
+                    syncing = true,
+                    error = null
+                )
+            }
+            initialSync(currentGeneration)
         } catch (error: Exception) {
             if (error is CancellationException) throw error
+            Log.w("LibreCapSync", "Saved-session restore failed: ${error.javaClass.simpleName}")
             if (currentGeneration == generation) {
                 val invalidCredentials = error.isInvalidCredentials()
                 client = null
@@ -200,8 +326,96 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
                         ready = true,
                         authenticated = it.authenticated && !invalidCredentials,
                         syncing = false,
-                        error = friendlyError(error, if (it.authenticated) "Saved data is available, but syncing failed. Try again." else "Please sign in again.")
+                        error = friendlyError(
+                            error,
+                            if (it.authenticated) "Saved data is available, but syncing failed. Try again." else "Please sign in again.",
+                            hasCachedData = it.data.profile != null || it.data.grades.isNotEmpty() || it.data.timetable != null
+                        )
                     )
+                }
+            }
+        }
+    }
+
+
+    fun loadTimetableWeek(date: LocalDate) {
+        val weekStart = date.with(DayOfWeek.MONDAY)
+        val weekKey = weekStart.toString()
+        val currentData = state.value.data
+        val cachedWeek = currentData.timetableWeeks[weekKey]
+            ?: currentData.timetable?.takeIf { it.weekStart == weekKey }
+        if (cachedWeek != null) {
+            update {
+                it.copy(
+                    data = it.data.copy(timetable = cachedWeek),
+                    scheduleLoading = false,
+                    scheduleError = null
+                )
+            }
+            return
+        }
+
+        val activeClient = client
+        if (activeClient == null) {
+            val savedCredentials = credentials.load()
+            val canReconnect = savedCredentials != null &&
+                scheduleReconnectAttemptedForWeek != weekKey &&
+                !state.value.syncing
+            if (canReconnect) {
+                scheduleReconnectAttemptedForWeek = weekKey
+                update { it.copy(scheduleLoading = true, scheduleError = null) }
+                retry()
+            } else {
+                update {
+                    it.copy(
+                        scheduleLoading = false,
+                        scheduleError = if (savedCredentials == null) {
+                            "Sign in and sync Librus to load another week."
+                        } else {
+                            "Librus session is unavailable. Tap Try again to reconnect."
+                        }
+                    )
+                }
+            }
+            return
+        }
+        scheduleReconnectAttemptedForWeek = null
+
+        timetableJob?.cancel()
+        val requestGeneration = generation
+        update { it.copy(scheduleLoading = true, scheduleError = null) }
+        timetableJob = viewModelScope.launch {
+            try {
+                val loaded = withContext(Dispatchers.IO) {
+                    activeClient.fetchTimetable(weekStart)
+                }
+                if (requestGeneration != generation) return@launch
+                val latest = state.value.data
+                val weeks = latest.timetableWeeks.toMutableMap()
+                weeks[weekKey] = loaded
+                val updated = latest.copy(
+                    timetable = loaded,
+                    timetableWeeks = weeks,
+                    timetableUpdatedAt = Instant.now().toString()
+                )
+                localStore.save(updated)
+                update {
+                    it.copy(
+                        data = updated,
+                        scheduleLoading = false,
+                        scheduleError = null
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (requestGeneration == generation) {
+                    update {
+                        it.copy(
+                            scheduleLoading = false,
+                            scheduleError = friendlyError(error, "This week could not be loaded. Try again.")
+                        )
+                    }
                 }
             }
         }
@@ -211,6 +425,9 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
         generation += 1
         client = null
         syncJob?.cancel()
+        startupLoadingJob?.cancel()
+        startupLoadingActive = false
+        timetableJob?.cancel()
         credentials.clear()
         localStore.clear()
         update {
@@ -224,6 +441,8 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
                 error = null,
                 messageRecipients = emptyList(),
                 loadingMessageRecipients = false,
+                downloadingAttachmentId = null,
+                attachmentError = null,
                 sendingMessage = false,
                 messageActionError = null,
                 messageActionSuccess = false
@@ -239,11 +458,58 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun note(id: String): SchoolNote? = state.value.notes.firstOrNull { it.id == id }
-    fun loadMessage(id: String) {
+    fun loadMessage(id: String, folder: MessageFolder = MessageFolder.INBOX) {
         currentMessage.value = null
-        val activeClient = client ?: return
+        val activeClient = client
+        if (activeClient == null) {
+            update {
+                it.copy(
+                    loadingMessage = false,
+                    messageDetailError = "Librus is not connected. Refresh school data before opening a message."
+                )
+            }
+            return
+        }
+        update { it.copy(loadingMessage = true, messageDetailError = null, downloadingAttachmentId = null, attachmentError = null) }
         viewModelScope.launch {
-            currentMessage.value = runCatching { withContext(Dispatchers.IO) { activeClient.fetchMessage(id) } }.getOrNull()
+            try {
+                currentMessage.value = withContext(Dispatchers.IO) { activeClient.fetchMessage(id, folder) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                update {
+                    it.copy(
+                        messageDetailError = friendlyError(error, "Could not load this message. Refresh school data and try again.", hasCachedData = true)
+                    )
+                }
+            } finally {
+                update { it.copy(loadingMessage = false) }
+            }
+        }
+    }
+
+    fun openMessageInBrowser(messageId: String) {
+        val path = messageId.split('-').filter(String::isNotBlank).joinToString("/")
+        val messageUrl = "https://synergia.librus.pl/wiadomosci/$path"
+        update { it.copy(attachmentError = null) }
+        try {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(messageUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (_: ActivityNotFoundException) {
+            update { it.copy(attachmentError = "Could not open Librus in a browser.") }
+        }
+    }
+
+    private fun startStartupLoading(currentGeneration: Int) {
+        startupLoadingJob?.cancel()
+        startupLoadingActive = true
+        startupLoadingJob = viewModelScope.launch {
+            delay(STARTUP_LOADING_MS)
+            if (currentGeneration != generation) return@launch
+            startupLoadingActive = false
+            update { it.copy(ready = true) }
         }
     }
     fun loadMessageRecipients() {
@@ -321,7 +587,9 @@ class SchoolViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun Throwable?.isInvalidCredentials(): Boolean = this is LibrusClientError && kind == LibrusErrorKind.INVALID_CREDENTIALS
 
-    private fun friendlyError(error: Throwable, fallback: String): String = when {
+    private fun friendlyError(error: Throwable, fallback: String, hasCachedData: Boolean = false): String = when {
+        error is LibrusClientError && error.kind == LibrusErrorKind.UNAVAILABLE && hasCachedData ->
+            "Librus is temporarily unavailable. Showing saved data from your last sync. Try again later."
         error is LibrusClientError -> error.message ?: fallback
         error is UnknownHostException -> "No internet connection. Check your network and try again."
         error is SocketTimeoutException -> "Librus took too long to respond. Check your connection and try again."
