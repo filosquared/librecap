@@ -11,6 +11,8 @@ Python 3.13, `aiohttp`, `BeautifulSoup4`, `cryptography`, SQLite, HTML/CSS/vanil
 - Run: `python3 librusik.py --skip-wizard`
 - macOS app: `python3 macos_app.py` after `pip install -r requirements-macos.txt`
 - macOS bundle: `./tools/build-macos-app.sh`
+- Windows app: `python desktop_app.py` after `pip install -r requirements-windows.txt`
+- Windows bundle: `powershell -ExecutionPolicy Bypass -File .\tools\build-windows.ps1`
 - iOS simulator build: `./tools/build-ios.sh` after installing full Xcode
 - Syntax check: `PYTHONPYCACHEPREFIX=/tmp/librecap-pycache python3 -m compileall -q .`
 - Tests: `python3 -m unittest discover -s tests`

@@ -10,6 +10,7 @@ import string
 import argparse
 import secrets
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from cryptography.fernet import Fernet
 from aiohttp import web
@@ -23,18 +24,44 @@ greetings = ["How are you doing?", "Good to see you again.", "How are things?", 
 
 
 # Data location. Resolve bundled assets from the executable when frozen, while
-# keeping runtime data in a protected per-user directory on macOS.
+# keeping packaged desktop runtime data in a protected per-user directory.
 if getattr(sys, "frozen", False):
 	BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
 else:
 	BASE_DIR = Path(__file__).resolve().parent.parent
 PATH = str(BASE_DIR)
-if os.environ.get("LIBRECAP_DATA_DIR"):
-	DEFAULT_DATA_DIR = os.environ["LIBRECAP_DATA_DIR"]
-elif getattr(sys, "frozen", False) and sys.platform == "darwin":
-	DEFAULT_DATA_DIR = str(Path.home() / "Library" / "Application Support" / "LibreCap")
-else:
-	DEFAULT_DATA_DIR = str(BASE_DIR / "data")
+
+
+def default_data_dir(
+	base_dir: Path,
+	*,
+	frozen: bool,
+	platform_name: str,
+	home: Path,
+	environ: Mapping[str, str],
+) -> Path:
+	"""Return the default writable data directory for a runtime environment."""
+	override = environ.get("LIBRECAP_DATA_DIR")
+	if override:
+		return Path(override)
+	if frozen and platform_name == "darwin":
+		return home / "Library" / "Application Support" / "LibreCap"
+	if frozen and platform_name == "win32":
+		local_app_data = environ.get("LOCALAPPDATA")
+		root = Path(local_app_data) if local_app_data else home / "AppData" / "Local"
+		return root / "LibreCap"
+	return base_dir / "data"
+
+
+DEFAULT_DATA_DIR = str(
+	default_data_dir(
+		BASE_DIR,
+		frozen=getattr(sys, "frozen", False),
+		platform_name=sys.platform,
+		home=Path.home(),
+		environ=os.environ,
+	)
+)
 DATA_DIR = DEFAULT_DATA_DIR
 PROFILE_PIC_DIR = os.path.join(DATA_DIR, "profile_pics")
 STORE = SQLiteStore(DATA_DIR)

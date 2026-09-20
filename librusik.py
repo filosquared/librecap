@@ -14,6 +14,7 @@ from aiohttp import web
 from lib.api import librus
 from lib.api import Librus
 from lib.api import SessionManager
+from lib.desktop import build_app_url
 from lib.security import AuthSessionManager, hash_password, needs_rehash, verify_password
 from lib.utils import *
 from shutil import copytree
@@ -55,6 +56,7 @@ CONFIG_DEFAULT = {
 
 config, database = setup(CONFIG_DEFAULT)
 resources = load_html_resources(config)
+ACTIVE_PORT = None
 LIBRUSIK_PATH = os.path.dirname(os.path.abspath(__file__)) + "/"
 SESSIONS = SessionManager(database)
 AUTH_SESSIONS = AuthSessionManager()
@@ -64,6 +66,11 @@ PANEL_SESSION_COOKIE = "librecap_admin_session"
 BOOT = round(time.time())
 welcome = welcomes[0]
 greeting = greetings[0]
+
+
+def local_url() -> str:
+	"""Return the URL for the currently running local server."""
+	return build_app_url(config, port=ACTIVE_PORT)
 
 
 async def updatetitles():
@@ -1399,8 +1406,9 @@ app.add_routes([
 	web.static('/', str(BASE_DIR / 'static'))
 ])
 
-async def run_server(open_browser=False, on_started=None):
+async def run_server(open_browser=False, on_started=None, shutdown_event=None, port=None):
 	"""Run LibreCap until the host application asks it to stop."""
+	global ACTIVE_PORT
 	runner = web.AppRunner(app)
 	await runner.setup()
 	ssl_context = None
@@ -1410,20 +1418,25 @@ async def run_server(open_browser=False, on_started=None):
 	site = web.TCPSite(
 		runner,
 		host=config["listen_address"],
-		port=config["port"],
+		port=config["port"] if port is None else port,
 		ssl_context=ssl_context,
 	)
 	await site.start()
+	sockets = site._server.sockets if site._server else []
+	ACTIVE_PORT = sockets[0].getsockname()[1] if sockets else config["port"]
 	title_task = asyncio.create_task(updatetitles())
 	try:
 		if on_started:
 			on_started()
 		if open_browser:
 			import webbrowser
-			scheme = "https" if config["ssl"] else "http"
-			webbrowser.open(f"{scheme}://127.0.0.1:{config['port']}{config['subdirectory']}")
-		await asyncio.Event().wait()
+			webbrowser.open(local_url())
+		if shutdown_event is None:
+			await asyncio.Event().wait()
+		else:
+			await shutdown_event.wait()
 	finally:
+		ACTIVE_PORT = None
 		title_task.cancel()
 		await runner.cleanup()
 
