@@ -260,22 +260,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func downloadMessageAttachment(_ attachment: MessageAttachment) async throws -> DownloadedMessageAttachment {
+    func resolveMessageAttachmentURL(_ attachment: MessageAttachment) async throws -> URL {
         let generation = sessionGeneration
         guard let initialClient = client else {
             throw LibrusClientError.sessionUnauthorized
         }
 
         do {
-            return try await initialClient.downloadMessageAttachment(attachment)
+            let url = try await initialClient.resolveMessageAttachmentURL(attachment)
+            try Task.checkCancellation()
+            guard sessionGeneration == generation else { throw CancellationError() }
+            return url
         } catch let error as LibrusClientError where error == .sessionUnauthorized {
+            guard sessionGeneration == generation else { throw CancellationError() }
             guard let credentials = keychain.load() else { throw error }
             let refreshedClient = LibrusClient()
             _ = try await refreshedClient.login(username: credentials.username, password: credentials.password)
             try Task.checkCancellation()
             guard sessionGeneration == generation else { throw CancellationError() }
             client = refreshedClient
-            return try await refreshedClient.downloadMessageAttachment(attachment)
+            let url = try await refreshedClient.resolveMessageAttachmentURL(attachment)
+            try Task.checkCancellation()
+            guard sessionGeneration == generation else { throw CancellationError() }
+            return url
         }
     }
 

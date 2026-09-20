@@ -38,7 +38,7 @@ final class LibrusClient {
     private let apiBase = URL(string: "https://synergia.librus.pl/gateway/api/2.0/")!
     private let portalBase = URL(string: "https://synergia.librus.pl")!
     private let logger = Logger(subsystem: "com.filiplopes.LibreCap", category: "network")
-    private let cookieStorage: HTTPCookieStorage
+    private let redirectDelegate: RedirectDelegate
     private let session: URLSession
 
     init(configuration: URLSessionConfiguration = .ephemeral) {
@@ -49,8 +49,84 @@ final class LibrusClient {
         configuration.httpCookieAcceptPolicy = .always
         let cookieStorage = configuration.httpCookieStorage ?? HTTPCookieStorage()
         configuration.httpCookieStorage = cookieStorage
-        self.cookieStorage = cookieStorage
-        session = URLSession(configuration: configuration)
+        let redirectDelegate = RedirectDelegate()
+        self.redirectDelegate = redirectDelegate
+        session = URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
+        redirectDelegate.owner = self
+    }
+
+    private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
+        weak var owner: LibrusClient?
+
+        func urlSession(
+            _: URLSession,
+            task _: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            if let owner {
+                completionHandler(owner.attachmentRedirectRequest(response: response, newRequest: newRequest))
+            } else {
+                completionHandler(newRequest)
+            }
+        }
+    }
+
+    func attachmentRedirectRequest(response: HTTPURLResponse, newRequest: URLRequest) -> URLRequest? {
+        guard let sourceURL = response.url,
+              let targetURL = newRequest.url,
+              sourceURL.host == "synergia.librus.pl",
+              sourceURL.path.lowercased().contains("/wiadomosci/pobierz_zalacznik/")
+        else {
+            return newRequest
+        }
+        // Preserve the server's Location for browser handoff. Never fetch the
+        // attachment landing page with the authenticated school-data session.
+        _ = targetURL
+        return nil
+    }
+
+    // Report only structural facts. Paths, query values and user info may contain
+    // signed download tokens or personal data and must never enter the console.
+    static func attachmentRedirectDiagnostics(_ url: URL) -> String {
+        let parts = url.path.split(separator: "/")
+        let route = parts.first.map(String.init)?.lowercased()
+        let routeClass = route == "getfile" ? "GetFile" :
+            (route == "loguj" || route == "oauth" ? "login" : "other")
+        let hostClass = url.host == "sandbox.librus.pl" ? "sandbox" :
+            (url.host == "synergia.librus.pl" ? "synergia" : "other")
+        return "https=\(url.scheme == "https") host=\(hostClass) standardPort=\(url.port == nil || url.port == 443) userInfo=\(url.user != nil || url.password != nil) fragment=\(url.fragment != nil) query=\(url.query != nil) route=\(routeClass) segments=\(parts.count) endsInGet=\(parts.last?.lowercased() == "get")"
+    }
+
+    static func attachmentBrowserURL(_ location: String) throws -> URL {
+        guard let url = URL(string: location),
+              url.scheme == "https", url.host == "sandbox.librus.pl",
+              url.user == nil, url.password == nil,
+              url.port == nil || url.port == 443 else {
+            throw LibrusClientError.unexpectedResponse
+        }
+        return url
+    }
+
+    func resolveMessageAttachmentURL(_ attachment: MessageAttachment) async throws -> URL {
+        guard let url = attachment.downloadURL else { throw LibrusClientError.malformedData }
+        let (data, response) = try await request(url: url, headers: ["Accept": "*/*"])
+        if [301, 302, 303, 307, 308].contains(response.statusCode),
+           let location = response.value(forHTTPHeaderField: "Location") {
+            // Login redirects need session recovery; download redirects are
+            // returned verbatim, including the provider's signed query string.
+            if let target = URL(string: location, relativeTo: url)?.absoluteURL,
+               ["synergia.librus.pl", "api.librus.pl"].contains(target.host ?? ""),
+               target.path.lowercased().contains("loguj") || target.path.lowercased().contains("oauth") {
+                throw LibrusClientError.sessionUnauthorized
+            }
+            return try Self.attachmentBrowserURL(location)
+        }
+        if isLoginRedirect(data: data, response: response) {
+            throw LibrusClientError.sessionUnauthorized
+        }
+        throw responseError(response, operation: "resolving an attachment browser link")
     }
 
     func login(username: String, password: String) async throws -> StudentProfile {
@@ -455,13 +531,13 @@ final class LibrusClient {
             throw LibrusClientError.malformedData
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue(portalBase.absoluteString + "/wiadomosci/", forHTTPHeaderField: "Referer")
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw LibrusClientError.unexpectedResponse
-        }
+        let (data, httpResponse) = try await request(
+            url: url,
+            headers: [
+                "Accept": "*/*",
+                "Referer": portalBase.absoluteString + "/wiadomosci/"
+            ]
+        )
 
         if isLoginRedirect(data: data, response: httpResponse) {
             throw LibrusClientError.sessionUnauthorized
@@ -470,7 +546,10 @@ final class LibrusClient {
             throw responseError(httpResponse, operation: "downloading a message attachment")
         }
         guard httpResponse.mimeType?.lowercased().contains("html") != true else {
-            throw LibrusClientError.unexpectedResponse
+            // Librus sometimes answers an attachment request with an HTML login
+            // page while keeping the original attachment URL. Let AppModel
+            // refresh the authenticated session and retry the download.
+            throw LibrusClientError.sessionUnauthorized
         }
 
         let fileName = attachmentFileName(from: httpResponse, fallback: attachment.name)

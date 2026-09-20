@@ -529,14 +529,13 @@ struct MessagesView: View {
 }
 
 private struct MessageDetailView: View {
+    @Environment(\.openURL) private var openURL
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     let summary: MessageSummary
     @State private var detail: MessageDetail?
     @State private var isLoading = true
     @State private var downloadingAttachmentID: String?
-    @State private var downloadedAttachmentID: String?
-    @State private var downloadedAttachment: DownloadedMessageAttachment?
     @State private var attachmentError: String?
 
     var body: some View {
@@ -567,13 +566,7 @@ private struct MessageDetailView: View {
                                         .lineLimit(2)
                                     Spacer(minLength: 8)
                                     if attachment.downloadURL != nil {
-                                        if downloadedAttachmentID == attachment.id,
-                                           let downloadedAttachment {
-                                            ShareLink(item: downloadedAttachment.fileURL) {
-                                                Label(settings.text(.saveFile), systemImage: "square.and.arrow.down")
-                                            }
-                                            .buttonStyle(.bordered)
-                                        } else if downloadingAttachmentID == attachment.id {
+                                        if downloadingAttachmentID == attachment.id {
                                             ProgressView()
                                                 .controlSize(.small)
                                         } else {
@@ -582,8 +575,12 @@ private struct MessageDetailView: View {
                                                     downloadingAttachmentID = attachment.id
                                                     attachmentError = nil
                                                     do {
-                                                        downloadedAttachment = try await model.downloadMessageAttachment(attachment)
-                                                        downloadedAttachmentID = attachment.id
+                                                        let url = try await model.resolveMessageAttachmentURL(attachment)
+                                                        openURL(url) { accepted in
+                                                            if !accepted {
+                                                                attachmentError = "Could not open the browser. Please try again."
+                                                            }
+                                                        }
                                                     } catch is CancellationError {
                                                     } catch {
                                                         attachmentError = error.localizedDescription
