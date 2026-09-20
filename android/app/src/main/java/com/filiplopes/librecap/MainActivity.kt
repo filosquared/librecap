@@ -90,6 +90,7 @@ import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -299,7 +300,7 @@ private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     }
     Scaffold(
         bottomBar = {
-            if (route in mainRoutes) BottomBar(route, ui.language) { route = it }
+            if (route in mainRoutes) BottomBar(route, ui.language) { selectedId = ""; route = it }
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -429,13 +430,23 @@ private fun RouteContent(
         Route.HOME -> HomeScreen(ui, viewModel, { go(Route.HOMEWORK, "") }, { go(Route.ATTENDANCE, "") }, { go(Route.MESSAGES, "") }, { go(Route.LESSON_DETAIL, it) })
         Route.GRADES -> GradesScreen(ui, viewModel) { go(Route.GRADE_DETAIL, it) }
         Route.SCHEDULE -> ScheduleScreen(ui, viewModel) { go(Route.LESSON_DETAIL, it) }
-        Route.MESSAGES -> MessagesScreen(ui, viewModel, { go(Route.MESSAGE_DETAIL, it) }) { go(Route.NEW_MESSAGE, "") }
+        Route.MESSAGES -> MessagesScreen(
+            ui,
+            viewModel,
+            initialFolder = when (selectedId) {
+                MessageFolder.ANNOUNCEMENTS.name -> MessageFolder.ANNOUNCEMENTS
+                MessageFolder.NOTES.name -> MessageFolder.NOTES
+                else -> MessageFolder.INBOX
+            },
+            open = { go(Route.MESSAGE_DETAIL, it) },
+            newMessage = { go(Route.NEW_MESSAGE, "") }
+        )
         Route.NEW_MESSAGE -> NewMessageScreen(ui, viewModel, { go(Route.MESSAGES, "") }) {
             viewModel.clearMessageAction()
             go(Route.MESSAGES, "")
             viewModel.sync()
         }
-        Route.MORE -> MoreScreen(ui, viewModel) { go(it, "") }
+        Route.MORE -> MoreScreen(ui, viewModel, { go(it, "") }) { folder -> go(Route.MESSAGES, folder.name) }
         Route.HOMEWORK -> HomeworkScreen(ui, viewModel) { go(Route.HOMEWORK_DETAIL, it) }
         Route.ATTENDANCE -> AttendanceScreen(ui, viewModel)
         Route.SETTINGS -> SettingsScreen(ui, viewModel) { go(Route.HOME, "") }
@@ -624,7 +635,7 @@ private fun GradesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (S
     val gradesBySubject = remember(filtered) { filtered.groupBy { it.subject }.toSortedMap() }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("Grades", "Oceny"), onRefresh = viewModel::sync, refreshing = ui.syncing)
-        ScrollableTabRow(selectedTabIndex = semester.ordinal, edgePadding = 16.dp) {
+        TabRow(selectedTabIndex = semester.ordinal) {
             listOf(lang.text("First semester", "Pierwsze półrocze"), lang.text("Second semester", "Drugie półrocze"), lang.text("All", "Wszystkie")).forEachIndexed { index, label ->
                 Tab(selected = semester.ordinal == index, onClick = { semester = GradeSemester.entries[index] }, text = { Text(label) })
             }
@@ -948,17 +959,38 @@ private fun HomeworkDetail(homework: HomeworkRecord, ui: SchoolUiState, viewMode
 }
 
 @Composable
-private fun MessagesScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (String) -> Unit, newMessage: () -> Unit) {
-    var folder by rememberSaveable { mutableStateOf(MessageFolder.INBOX) }
+private fun MessagesScreen(
+    ui: SchoolUiState,
+    viewModel: SchoolViewModel,
+    initialFolder: MessageFolder,
+    open: (String) -> Unit,
+    newMessage: () -> Unit
+) {
+    var folder by rememberSaveable(initialFolder) { mutableStateOf(initialFolder) }
     val lang = ui.language
-    val labels = listOf(lang.text("Received", "Odebrane"), lang.text("Sent", "Wysłane"), lang.text("Announcements", "Ogłoszenia"), lang.text("Notes", "Uwagi"))
+    val folders = listOf(MessageFolder.INBOX, MessageFolder.SENT)
+    val labels = listOf(lang.text("Received", "Odebrane"), lang.text("Sent", "Wysłane"))
     val records = ui.data.messages.filter { it.folder == folder && !it.isLikelyHeaderRow }
+    val showFolderTabs = folder == MessageFolder.INBOX || folder == MessageFolder.SENT
+    val folderLabel = when (folder) {
+        MessageFolder.INBOX -> labels[0]
+        MessageFolder.SENT -> labels[1]
+        MessageFolder.ANNOUNCEMENTS -> lang.text("Announcements", "Ogłoszenia")
+        MessageFolder.NOTES -> lang.text("Notes", "Uwagi")
+    }
+    val screenTitle = when (folder) {
+        MessageFolder.ANNOUNCEMENTS -> lang.text("Announcements", "Ogłoszenia")
+        MessageFolder.NOTES -> lang.text("Notes", "Uwagi")
+        else -> lang.text("Messages", "Wiadomości")
+    }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            ScreenTopBar(lang.text("Messages", "Wiadomości"), onRefresh = viewModel::sync, refreshing = ui.syncing)
-            ScrollableTabRow(selectedTabIndex = folder.ordinal, edgePadding = 12.dp) { labels.forEachIndexed { index, label -> Tab(selected = folder.ordinal == index, onClick = { folder = MessageFolder.entries[index] }, text = { Text(label) }) } }
+            ScreenTopBar(screenTitle, onRefresh = viewModel::sync, refreshing = ui.syncing)
+            if (showFolderTabs) {
+                TabRow(selectedTabIndex = folders.indexOf(folder)) { labels.forEachIndexed { index, label -> Tab(selected = folder == folders[index], onClick = { folder = folders[index] }, text = { Text(label) }) } }
+            }
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (records.isEmpty()) item { EmptyState(labels[folder.ordinal], lang.text("No messages in this folder.", "Brak wiadomości w tej kategorii."), Icons.Default.Email) }
+                if (records.isEmpty()) item { EmptyState(folderLabel, lang.text("No messages in this folder.", "Brak wiadomości w tej kategorii."), Icons.Default.Email) }
                 items(records, key = { it.id }) { message -> Card(onClick = { open(message.id) }, modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { Row { Text(message.sender, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)); Text(message.date, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; Text(message.subject) } } }
             }
         }
@@ -1154,9 +1186,30 @@ private fun MessageDetailScreen(summary: MessageSummary, ui: SchoolUiState, view
 
 @Composable
 private fun AttendanceScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
+    val presentCount = ui.data.attendances.count { it.isPresence }
+    val absentCount = ui.data.attendances.count { !it.isPresence }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(ui.language.text("Attendance", "Frekwencja"), onRefresh = viewModel::sync, refreshing = ui.syncing)
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AttendanceSummaryCard(
+                        title = ui.language.text("Present", "Obecności"),
+                        count = presentCount,
+                        color = Color(0xFF2E8B57),
+                        modifier = Modifier.weight(1f)
+                    )
+                    AttendanceSummaryCard(
+                        title = ui.language.text("Absent", "Nieobecności"),
+                        count = absentCount,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
             if (ui.data.attendances.isEmpty()) item { EmptyState(ui.language.text("No attendance", "Brak frekwencji"), ui.language.text("No data available.", "Brak danych."), Icons.Default.EventAvailable) }
             items(ui.data.attendances, key = { it.id }) { attendance -> Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(attendance.subject, fontWeight = FontWeight.SemiBold); Text("${attendance.date} · ${attendance.teacher}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; Text(attendance.shortType, color = if (attendance.isPresence) Color(0xFF2E8B57) else MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold) } } }
         }
@@ -1164,7 +1217,23 @@ private fun AttendanceScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
 }
 
 @Composable
-private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Route) -> Unit) {
+private fun AttendanceSummaryCard(title: String, count: Int, color: Color, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier.height(104.dp),
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.22f))
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(count.toString(), color = color, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Route) -> Unit, openMessageFolder: (MessageFolder) -> Unit) {
     val lang = ui.language
     val luckyDate = LocalDate.now().format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))
     Column(Modifier.fillMaxSize()) {
@@ -1206,6 +1275,8 @@ private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Rou
                 }
             }
             item { MoreRow(Icons.Default.Assignment, lang.text("Homework", "Prace domowe"), lang.text("Assignments and tests", "Zadania i sprawdziany")) { open(Route.HOMEWORK) } }
+            item { MoreRow(Icons.Default.Info, lang.text("Announcements", "Ogłoszenia"), lang.text("School announcements", "Ogłoszenia szkolne")) { openMessageFolder(MessageFolder.ANNOUNCEMENTS) } }
+            item { MoreRow(Icons.Default.NoteAlt, lang.text("Notes", "Uwagi"), lang.text("Teacher notes", "Uwagi nauczycieli")) { openMessageFolder(MessageFolder.NOTES) } }
             item { MoreRow(Icons.Default.EventAvailable, lang.text("Attendance", "Frekwencja"), lang.text("Presence and absences", "Obecności i nieobecności")) { open(Route.ATTENDANCE) } }
             item { MoreRow(Icons.Default.Settings, lang.text("Settings", "Ustawienia"), lang.text("Language, appearance, and sync", "Język, wygląd i synchronizacja")) { open(Route.SETTINGS) } }
             item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.2.0") {} }
