@@ -294,7 +294,47 @@ private fun LoginScreen(ui: SchoolUiState, viewModel: SchoolViewModel) {
 private fun AuthenticatedApp(ui: SchoolUiState, viewModel: SchoolViewModel) {
     var route by rememberSaveable { mutableStateOf(Route.HOME) }
     var selectedId by rememberSaveable { mutableStateOf("") }
-    BackHandler(enabled = route !in mainRoutes) { route = Route.HOME }
+    val messageSubroute = route == Route.MESSAGES && selectedId in setOf(MessageFolder.ANNOUNCEMENTS.name, MessageFolder.NOTES.name)
+    val messageParentFolder = ui.data.messages.firstOrNull { it.id == selectedId }?.folder
+        ?.takeIf { it == MessageFolder.ANNOUNCEMENTS || it == MessageFolder.NOTES }
+        ?.name
+        .orEmpty()
+    BackHandler(enabled = route !in mainRoutes || messageSubroute) {
+        when (route) {
+            Route.MESSAGES -> {
+                selectedId = ""
+                route = Route.MORE
+            }
+            Route.HOMEWORK, Route.ATTENDANCE, Route.SETTINGS -> {
+                selectedId = ""
+                route = Route.MORE
+            }
+            Route.GRADE_DETAIL -> {
+                selectedId = ""
+                route = Route.GRADES
+            }
+            Route.LESSON_DETAIL -> {
+                selectedId = ""
+                route = Route.SCHEDULE
+            }
+            Route.HOMEWORK_DETAIL -> {
+                selectedId = ""
+                route = Route.HOMEWORK
+            }
+            Route.MESSAGE_DETAIL -> {
+                selectedId = messageParentFolder
+                route = Route.MESSAGES
+            }
+            Route.NEW_MESSAGE -> {
+                selectedId = ""
+                route = Route.MESSAGES
+            }
+            else -> {
+                selectedId = ""
+                route = Route.HOME
+            }
+        }
+    }
     val go: (Route, String) -> Unit = remember {
         { next, id -> selectedId = id; route = next }
     }
@@ -453,7 +493,10 @@ private fun RouteContent(
         Route.GRADE_DETAIL -> ui.data.grades.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Grade details", "Szczegóły oceny"), { go(Route.GRADES, "") }) { GradeDetail(it, ui.language) } }
         Route.LESSON_DETAIL -> findLesson(ui.data, selectedId)?.let { lesson -> DetailScaffold(ui.language.text("Lesson details", "Szczegóły lekcji"), { go(Route.SCHEDULE, "") }) { LessonDetail(lesson, ui, viewModel) } }
         Route.HOMEWORK_DETAIL -> ui.data.homeworks.firstOrNull { it.id == selectedId }?.let { DetailScaffold(ui.language.text("Homework details", "Szczegóły pracy domowej"), { go(Route.HOMEWORK, "") }) { HomeworkDetail(it, ui, viewModel) } }
-        Route.MESSAGE_DETAIL -> ui.data.messages.firstOrNull { it.id == selectedId }?.let { MessageDetailScreen(it, ui, viewModel) { go(Route.MESSAGES, "") } }
+        Route.MESSAGE_DETAIL -> ui.data.messages.firstOrNull { it.id == selectedId }?.let { message ->
+            val folderId = message.folder.takeIf { it == MessageFolder.ANNOUNCEMENTS || it == MessageFolder.NOTES }?.name.orEmpty()
+            MessageDetailScreen(message, ui, viewModel) { go(Route.MESSAGES, folderId) }
+        }
     }
 }
 
@@ -530,6 +573,7 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
                     SummaryCard(lang.text("Attendance", "Frekwencja"), ui.data.attendances.count { !it.isPresence }.toString(), Icons.Default.EventAvailable, Color(0xFFD45151), attendance, Modifier.weight(1f))
                 }
             }
+            item { TodayCard(ui, viewModel, openLesson) }
         }
     }
 }
@@ -915,14 +959,22 @@ private fun LessonDetail(lesson: TimetableLesson, ui: SchoolUiState, viewModel: 
 
 @Composable
 private fun HomeworkScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (String) -> Unit) {
-    var assessmentsOnly by rememberSaveable { mutableStateOf(false) }
+    var testsOnly by rememberSaveable { mutableStateOf(false) }
     val lang = ui.language
-    val records = ui.data.homeworks.filter { !assessmentsOnly || it.isAssessment }
+    val records = ui.data.homeworks.filter { it.isAssessment == testsOnly }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar(lang.text("Homework", "Prace domowe"), onRefresh = viewModel::sync, refreshing = ui.syncing)
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !assessmentsOnly, onClick = { assessmentsOnly = false }, label = { Text(lang.text("All", "Wszystkie")) })
-            FilterChip(selected = assessmentsOnly, onClick = { assessmentsOnly = true }, label = { Text(lang.text("Tests & classwork", "Kartkówki i klasówki")) })
+        TabRow(selectedTabIndex = if (testsOnly) 1 else 0) {
+            Tab(
+                selected = !testsOnly,
+                onClick = { testsOnly = false },
+                text = { Text(lang.text("Homework", "Prace domowe")) }
+            )
+            Tab(
+                selected = testsOnly,
+                onClick = { testsOnly = true },
+                text = { Text(lang.text("Tests & classwork", "Kartkówki i klasówki")) }
+            )
         }
         LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (records.isEmpty()) item { EmptyState(lang.text("No homework", "Brak prac domowych"), lang.text("No data available.", "Brak danych."), Icons.Default.Assignment) }
@@ -1279,7 +1331,7 @@ private fun MoreScreen(ui: SchoolUiState, viewModel: SchoolViewModel, open: (Rou
             item { MoreRow(Icons.Default.NoteAlt, lang.text("Notes", "Uwagi"), lang.text("Teacher notes", "Uwagi nauczycieli")) { openMessageFolder(MessageFolder.NOTES) } }
             item { MoreRow(Icons.Default.EventAvailable, lang.text("Attendance", "Frekwencja"), lang.text("Presence and absences", "Obecności i nieobecności")) { open(Route.ATTENDANCE) } }
             item { MoreRow(Icons.Default.Settings, lang.text("Settings", "Ustawienia"), lang.text("Language, appearance, and sync", "Język, wygląd i synchronizacja")) { open(Route.SETTINGS) } }
-            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.2.0") {} }
+            item { MoreRow(Icons.Default.Info, lang.text("About LibreCap", "O LibreCap"), "LibreCap 1.3.0") {} }
         }
     }
 }
