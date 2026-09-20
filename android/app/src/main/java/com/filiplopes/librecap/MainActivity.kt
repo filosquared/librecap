@@ -519,7 +519,6 @@ private fun HomeScreen(ui: SchoolUiState, viewModel: SchoolViewModel, homework: 
                     SummaryCard(lang.text("Attendance", "Frekwencja"), ui.data.attendances.count { !it.isPresence }.toString(), Icons.Default.EventAvailable, Color(0xFFD45151), attendance, Modifier.weight(1f))
                 }
             }
-            item { TodayCard(ui, viewModel, openLesson) }
         }
     }
 }
